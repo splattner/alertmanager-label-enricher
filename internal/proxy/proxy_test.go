@@ -17,10 +17,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
 	"github.com/splattner/alertmanager-label-enricher/internal/alert"
 	"github.com/splattner/alertmanager-label-enricher/internal/config"
 	"github.com/splattner/alertmanager-label-enricher/internal/engine"
 	"github.com/splattner/alertmanager-label-enricher/internal/extract"
+	"github.com/splattner/alertmanager-label-enricher/internal/metrics"
 	"github.com/splattner/alertmanager-label-enricher/internal/source"
 	"github.com/splattner/alertmanager-label-enricher/internal/tlsutil"
 )
@@ -174,6 +177,39 @@ func TestRequiredRuleFailureReturns503AndDoesNotForward(t *testing.T) {
 	}
 	if called {
 		t.Fatal("target must not be called when a required rule fails")
+	}
+}
+
+func TestRequiredRuleFailureRecordsRuleEvaluationMetric(t *testing.T) {
+	cfg := &config.Config{
+		Server:     config.ServerConfig{MaxBodyBytes: 1 << 20},
+		Targets:    []config.TargetConfig{{URL: "http://unused"}},
+		Forward:    config.ForwardConfig{MinSuccess: 1, Timeout: config.Duration(time.Second)},
+		Enrichment: config.EnrichmentConfig{Timeout: config.Duration(time.Second)},
+		Sources:    []config.SourceConfig{{Name: "cmdb", Type: "http", HTTP: &config.HTTPSourceSpec{URL: "http://cmdb", AllowedHosts: []string{"cmdb"}}}},
+		Rules: []config.RuleConfig{{
+			Name:     "required-tier",
+			Required: true,
+			Actions: []config.ActionConfig{{Set: &config.SetAction{
+				Label: "tier",
+				From:  &config.FromConfig{Source: "cmdb", Jq: ".tier"},
+			}}},
+		}},
+	}
+	srv := newTestServer(t, cfg)
+
+	before := testutil.ToFloat64(metrics.RuleEvaluationsTotal.WithLabelValues("required-tier", "required_failed"))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v2/alerts", strings.NewReader(`[{"labels":{"alertname":"Test"}}]`))
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", rec.Code)
+	}
+
+	after := testutil.ToFloat64(metrics.RuleEvaluationsTotal.WithLabelValues("required-tier", "required_failed"))
+	if after != before+1 {
+		t.Fatalf("ale_rule_evaluations_total{rule=\"required-tier\",result=\"required_failed\"} = %v, want %v", after, before+1)
 	}
 }
 

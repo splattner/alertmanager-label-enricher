@@ -5,9 +5,12 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
 	"github.com/splattner/alertmanager-label-enricher/internal/alert"
 	"github.com/splattner/alertmanager-label-enricher/internal/config"
 	"github.com/splattner/alertmanager-label-enricher/internal/extract"
+	"github.com/splattner/alertmanager-label-enricher/internal/metrics"
 	"github.com/splattner/alertmanager-label-enricher/internal/source"
 )
 
@@ -291,5 +294,46 @@ func TestOptionalRuleFailsOpenOnLookupError(t *testing.T) {
 	labels, _ := a.Labels()
 	if _, exists := labels["tier"]; exists {
 		t.Fatal("tier should not be set when the lookup failed with no default")
+	}
+}
+
+func TestApplyRecordsSourceLookupMetrics(t *testing.T) {
+	ruleFor := func(sourceName string) *config.Config {
+		return &config.Config{
+			Targets: []config.TargetConfig{{URL: "http://x"}},
+			Sources: []config.SourceConfig{{Name: sourceName, Type: "file", File: &config.FileSourceSpec{Path: "/dev/null"}}},
+			Rules: []config.RuleConfig{{
+				Name:    "lookup",
+				Actions: []config.ActionConfig{{Set: &config.SetAction{Label: "team", From: &config.FromConfig{Source: sourceName, Jq: "."}}}},
+			}},
+		}
+	}
+
+	tests := []struct {
+		name       string
+		src        *fakeSource
+		wantResult string
+	}{
+		{"hit", &fakeSource{name: "src-hit", value: "found"}, "hit"},
+		{"miss", &fakeSource{name: "src-miss", value: nil}, "miss"},
+		{"error", &fakeSource{name: "src-error", err: errors.New("boom")}, "error"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := ruleFor(tt.src.name)
+			reg := fakeRegistry{tt.src.name: tt.src}
+			eng := compile(t, cfg, reg)
+
+			before := testutil.ToFloat64(metrics.SourceLookupsTotal.WithLabelValues(tt.src.name, tt.wantResult))
+			if _, err := eng.Apply(context.Background(), newAlert(map[string]string{"alertname": "Test"})); err != nil {
+				t.Fatalf("Apply: %v", err)
+			}
+			after := testutil.ToFloat64(metrics.SourceLookupsTotal.WithLabelValues(tt.src.name, tt.wantResult))
+
+			if after != before+1 {
+				t.Fatalf("ale_source_lookups_total{source=%q,result=%q} = %v, want %v", tt.src.name, tt.wantResult, after, before+1)
+			}
+		})
 	}
 }

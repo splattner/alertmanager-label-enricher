@@ -192,11 +192,15 @@ func (s *Server) enrich(ctx context.Context, eng *engine.Engine, alerts []alert.
 
 func recordResults(results []engine.Result) {
 	for _, res := range results {
-		if res.Skipped {
+		switch {
+		case res.Skipped:
 			metrics.RuleEvaluationsTotal.WithLabelValues(res.Rule, "skipped").Inc()
 			continue
+		case res.RequiredFailed:
+			metrics.RuleEvaluationsTotal.WithLabelValues(res.Rule, "required_failed").Inc()
+		default:
+			metrics.RuleEvaluationsTotal.WithLabelValues(res.Rule, "matched").Inc()
 		}
-		metrics.RuleEvaluationsTotal.WithLabelValues(res.Rule, "matched").Inc()
 		for _, l := range res.Added {
 			metrics.LabelsAddedTotal.WithLabelValues(res.Rule, l).Inc()
 		}

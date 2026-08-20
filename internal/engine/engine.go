@@ -6,10 +6,12 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"time"
 
 	"github.com/splattner/alertmanager-label-enricher/internal/alert"
 	"github.com/splattner/alertmanager-label-enricher/internal/config"
 	"github.com/splattner/alertmanager-label-enricher/internal/extract"
+	"github.com/splattner/alertmanager-label-enricher/internal/metrics"
 	"github.com/splattner/alertmanager-label-enricher/internal/source"
 	"github.com/splattner/alertmanager-label-enricher/internal/tmpl"
 )
@@ -22,12 +24,13 @@ type Sources interface {
 // Result records what happened evaluating one rule against one alert, for
 // metrics and dry-run logging.
 type Result struct {
-	Rule        string
-	Skipped     bool // matchers did not match
-	DryRun      bool
-	Added       []string
-	Overwritten []string
-	Dropped     []string
+	Rule           string
+	Skipped        bool // matchers did not match
+	RequiredFailed bool // a required action in this rule could not be satisfied
+	DryRun         bool
+	Added          []string
+	Overwritten    []string
+	Dropped        []string
 }
 
 // RequiredFailure is returned when a `required: true` rule could not be
@@ -142,6 +145,8 @@ func (e *Engine) Apply(ctx context.Context, a alert.Alert) ([]Result, error) {
 			value, ok, err := e.resolveValue(ctx, set, labels, annotations)
 			if err != nil || !ok {
 				if rule.spec.Required {
+					res.RequiredFailed = true
+					results = append(results, res)
 					return results, &RequiredFailure{Rule: rule.spec.Name, Label: set.spec.Label, Reason: err}
 				}
 				continue
@@ -189,7 +194,17 @@ func (e *Engine) resolveValue(ctx context.Context, set compiledSet, labels, anno
 		if !ok {
 			return "", false, fmt.Errorf("source %q is not registered", spec.From.Source)
 		}
+		start := time.Now()
 		result, err := src.Lookup(ctx, source.LookupInput{Labels: labels, Annotations: annotations})
+		metrics.SourceLookupDuration.WithLabelValues(spec.From.Source).Observe(time.Since(start).Seconds())
+		switch {
+		case err != nil:
+			metrics.SourceLookupsTotal.WithLabelValues(spec.From.Source, "error").Inc()
+		case result == nil:
+			metrics.SourceLookupsTotal.WithLabelValues(spec.From.Source, "miss").Inc()
+		default:
+			metrics.SourceLookupsTotal.WithLabelValues(spec.From.Source, "hit").Inc()
+		}
 		if err != nil {
 			if spec.Default != "" {
 				return spec.Default, true, nil
