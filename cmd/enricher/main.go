@@ -7,47 +7,42 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+
+	"github.com/spf13/cobra"
 )
 
 // version is set at build time via -ldflags "-X main.version=...".
 var version = "dev"
 
 func main() {
-	if len(os.Args) < 2 {
-		usage()
-		os.Exit(2)
-	}
-
-	var err error
-	switch os.Args[1] {
-	case "serve":
-		err = runServe(os.Args[2:])
-	case "check":
-		err = runCheck(os.Args[2:])
-	case "test":
-		err = runTest(os.Args[2:])
-	case "version":
-		fmt.Println(version)
-		return
-	default:
-		usage()
-		os.Exit(2)
-	}
-
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "error:", err)
+	if err := newRootCmd().Execute(); err != nil {
 		os.Exit(1)
 	}
 }
 
-func usage() {
-	fmt.Fprintln(os.Stderr, `usage: enricher <command> [flags]
+func newRootCmd() *cobra.Command {
+	root := &cobra.Command{
+		Use:           "enricher",
+		Short:         "Enrich Prometheus alert labels before forwarding to Alertmanager",
+		SilenceUsage:  true,
+		SilenceErrors: false,
+	}
+	root.AddCommand(newServeCmd())
+	root.AddCommand(newCheckCmd())
+	root.AddCommand(newTestCmd())
+	root.AddCommand(newVersionCmd())
+	return root
+}
 
-commands:
-  serve    run the enrichment proxy
-  check    validate a config file and exit
-  test     run one alert through the rule engine and print the label diff
-  version  print the build version`)
+func newVersionCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "version",
+		Short: "Print the build version",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			_, _ = fmt.Fprintln(cmd.OutOrStdout(), version)
+			return nil
+		},
+	}
 }
 
 func newLogger() *slog.Logger {

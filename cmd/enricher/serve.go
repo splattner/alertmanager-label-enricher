@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"flag"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -15,6 +14,7 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/spf13/cobra"
 	"k8s.io/client-go/dynamic"
 
 	"github.com/splattner/alertmanager-label-enricher/internal/config"
@@ -23,13 +23,21 @@ import (
 	"github.com/splattner/alertmanager-label-enricher/internal/wiring"
 )
 
-func runServe(args []string) error {
-	fs := flag.NewFlagSet("serve", flag.ExitOnError)
-	configPath := fs.String("config", "/etc/enricher/config.yaml", "path to the config file")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
+func newServeCmd() *cobra.Command {
+	var configPath string
 
+	cmd := &cobra.Command{
+		Use:   "serve",
+		Short: "Run the enrichment proxy",
+		RunE: func(_ *cobra.Command, _ []string) error {
+			return runServe(configPath)
+		},
+	}
+	cmd.Flags().StringVar(&configPath, "config", "/etc/enricher/config.yaml", "path to the config file")
+	return cmd
+}
+
+func runServe(configPath string) error {
 	log := newLogger()
 	srv := proxy.New(log)
 
@@ -39,7 +47,7 @@ func runServe(args []string) error {
 	var genCancel atomic.Pointer[context.CancelFunc]
 
 	reload := func() error {
-		cfg, err := config.Load(*configPath)
+		cfg, err := config.Load(configPath)
 		if err != nil {
 			return err
 		}
@@ -80,9 +88,9 @@ func runServe(args []string) error {
 	if err := reload(); err != nil {
 		return fmt.Errorf("initial config load: %w", err)
 	}
-	log.Info("config loaded", "path", *configPath)
+	log.Info("config loaded", "path", configPath)
 
-	go watchReload(ctx, *configPath, log, reload)
+	go watchReload(ctx, configPath, log, reload)
 
 	mux := http.NewServeMux()
 	mux.Handle("/", srv.Handler())
@@ -97,7 +105,7 @@ func runServe(args []string) error {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	initialCfg, err := config.Load(*configPath)
+	initialCfg, err := config.Load(configPath)
 	if err != nil {
 		return err
 	}
