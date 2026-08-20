@@ -1,8 +1,10 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -10,10 +12,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/splattner/alertmanager-label-enricher/internal/alert"
 	"github.com/splattner/alertmanager-label-enricher/internal/config"
 	"github.com/splattner/alertmanager-label-enricher/internal/engine"
 	"github.com/splattner/alertmanager-label-enricher/internal/extract"
@@ -359,5 +363,159 @@ func TestForwardDefaultIsNoRetries(t *testing.T) {
 	}
 	if got := atomic.LoadInt64(&attempts); got != 1 {
 		t.Fatalf("target received %d attempts, want exactly 1 (retries default to 0)", got)
+	}
+}
+
+// trackingSource records how many Lookup calls are in flight at once, and
+// blocks until release is closed - used to prove enrich() actually runs
+// alerts concurrently, bounded by maxConcurrency.
+type trackingSource struct {
+	release chan struct{}
+
+	mu      sync.Mutex
+	cur     int
+	maxSeen int
+}
+
+func (s *trackingSource) Name() string                { return "track" }
+func (s *trackingSource) Start(context.Context) error { return nil }
+func (s *trackingSource) HasSynced() bool             { return true }
+func (s *trackingSource) Lookup(_ context.Context, _ source.LookupInput) (any, error) {
+	s.mu.Lock()
+	s.cur++
+	if s.cur > s.maxSeen {
+		s.maxSeen = s.cur
+	}
+	s.mu.Unlock()
+
+	<-s.release
+
+	s.mu.Lock()
+	s.cur--
+	s.mu.Unlock()
+	return "value", nil
+}
+
+type trackingRegistry struct{ src source.Source }
+
+func (r trackingRegistry) Get(name string) (source.Source, bool) {
+	if name == "track" {
+		return r.src, true
+	}
+	return nil, false
+}
+
+func TestEnrichBoundsConcurrencyByMaxConcurrency(t *testing.T) {
+	const maxConcurrency = 2
+	const alertCount = 6
+
+	track := &trackingSource{release: make(chan struct{})}
+	cfg := &config.Config{
+		Targets: []config.TargetConfig{{URL: "http://alertmanager"}},
+		Sources: []config.SourceConfig{{Name: "track", Type: "file", File: &config.FileSourceSpec{Path: "/dev/null"}}},
+		Rules: []config.RuleConfig{{
+			Name: "lookup",
+			Actions: []config.ActionConfig{{Set: &config.SetAction{
+				Label: "team",
+				From:  &config.FromConfig{Source: "track", Jq: "."},
+			}}},
+		}},
+	}
+	if err := config.Validate(cfg); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	eng, err := engine.Compile(cfg, trackingRegistry{src: track}, extract.NewCache())
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	var alerts []alert.Alert
+	for i := 0; i < alertCount; i++ {
+		batch, err := alert.DecodeBatch([]byte(fmt.Sprintf(`[{"labels":{"alertname":"Test%d"}}]`, i)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		alerts = append(alerts, batch[0])
+	}
+
+	srv := New(discardLogger())
+	done := make(chan error, 1)
+	go func() {
+		done <- srv.enrich(context.Background(), eng, alerts, maxConcurrency)
+	}()
+
+	deadline := time.After(time.Second)
+	for {
+		track.mu.Lock()
+		cur := track.cur
+		track.mu.Unlock()
+		if cur == maxConcurrency {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("never observed %d concurrent lookups (currently %d)", maxConcurrency, cur)
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	close(track.release)
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("enrich returned error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("enrich did not return after lookups were released")
+	}
+
+	track.mu.Lock()
+	defer track.mu.Unlock()
+	if track.maxSeen != maxConcurrency {
+		t.Fatalf("max concurrent lookups seen = %d, want exactly %d (maxConcurrency should cap it, not just allow reaching it)", track.maxSeen, maxConcurrency)
+	}
+}
+
+func TestForwardStragglerSurvivesRequestContextCancellation(t *testing.T) {
+	fast := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer fast.Close()
+
+	slowDone := make(chan struct{})
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(150 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+		close(slowDone)
+	}))
+	defer slow.Close()
+
+	cfg := &config.Config{
+		Server:     config.ServerConfig{MaxBodyBytes: 1 << 20},
+		Targets:    []config.TargetConfig{{URL: fast.URL}, {URL: slow.URL}},
+		Forward:    config.ForwardConfig{MinSuccess: 1, Timeout: config.Duration(2 * time.Second)},
+		Enrichment: config.EnrichmentConfig{Timeout: config.Duration(time.Second)},
+	}
+	srv := newTestServer(t, cfg)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodPost, "/api/v2/alerts", strings.NewReader(`[{"labels":{"alertname":"Test"}}]`)).WithContext(ctx)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (minSuccess=1 met by the fast target)", rec.Code)
+	}
+
+	// Simulate what net/http.Server does once ServeHTTP returns: cancel the
+	// request context. The still-in-flight forward to the slow target must
+	// not be killed by that - it should be left to finish in the
+	// background, bounded only by its own forward.timeout.
+	cancel()
+
+	select {
+	case <-slowDone:
+	case <-time.After(time.Second):
+		t.Fatal("forward to the slow target was aborted by request context cancellation instead of finishing in the background")
 	}
 }

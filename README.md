@@ -92,10 +92,18 @@ forward:
 
 Each target is tried concurrently; `minSuccess` is how many must accept the
 batch before the response to Prometheus succeeds — the rest are left to
-finish in the background. `retries` applies per target, not per batch: a
-target gets up to `retries` extra attempts (separated by a short fixed
-backoff) before it's counted as failed. Retries stop early if the request
-context is done. The default, `retries: 0`, is a single attempt.
+finish in the background, independently of the now-completed request (so a
+slow replica isn't aborted the instant Prometheus gets its response).
+`retries` applies per target, not per batch: a target gets up to `retries`
+extra attempts (separated by a short fixed backoff) before it's counted as
+failed. The default, `retries: 0`, is a single attempt.
+
+Receiving a batch and forwarding it stay synchronous by design — the
+response to Prometheus is the delivery signal it uses for its own
+retry/backoff, so acking before forwarding actually succeeds would let
+failures go silently undetected. What *is* concurrent: forwarding to every
+target (above), and enriching every alert in a batch, bounded by
+`enrichment.maxConcurrency` (default 32).
 
 ### TLS
 

@@ -26,6 +26,9 @@ func Validate(cfg *Config) error {
 	if cfg.Forward.Retries < 0 {
 		return fmt.Errorf("forward.retries (%d) must not be negative", cfg.Forward.Retries)
 	}
+	if cfg.Enrichment.MaxConcurrency < 0 {
+		return fmt.Errorf("enrichment.maxConcurrency (%d) must not be negative", cfg.Enrichment.MaxConcurrency)
+	}
 
 	if cfg.Server.TLS != nil {
 		if cfg.Server.TLS.CertFile == "" || cfg.Server.TLS.KeyFile == "" {
