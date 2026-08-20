@@ -24,6 +24,18 @@ func Validate(cfg *Config) error {
 		return fmt.Errorf("forward.minSuccess (%d) exceeds the number of targets (%d)", cfg.Forward.MinSuccess, len(cfg.Targets))
 	}
 
+	if cfg.Server.TLS != nil {
+		if cfg.Server.TLS.CertFile == "" || cfg.Server.TLS.KeyFile == "" {
+			return fmt.Errorf("server.tls: certFile and keyFile are both required")
+		}
+	}
+	if cfg.Forward.TLS != nil {
+		t := cfg.Forward.TLS
+		if (t.CertFile == "") != (t.KeyFile == "") {
+			return fmt.Errorf("forward.tls: certFile and keyFile must both be set, or both empty")
+		}
+	}
+
 	sourceNames := make(map[string]bool, len(cfg.Sources))
 	for i, s := range cfg.Sources {
 		if s.Name == "" {

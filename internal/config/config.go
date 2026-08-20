@@ -23,8 +23,22 @@ type Config struct {
 
 // ServerConfig configures the enricher's own HTTP listener.
 type ServerConfig struct {
-	Listen       string `json:"listen"`
-	MaxBodyBytes int64  `json:"maxBodyBytes"`
+	Listen       string         `json:"listen"`
+	MaxBodyBytes int64          `json:"maxBodyBytes"`
+	TLS          *ServerTLSSpec `json:"tls,omitempty"`
+}
+
+// ServerTLSSpec configures TLS for the enricher's own listener — typically
+// used to authenticate the Prometheus instances allowed to POST alerts.
+// Whether the listener serves TLS at all is decided once at startup; a
+// config reload can rotate the certificate/key/client CA but cannot toggle
+// TLS on or off without a restart.
+type ServerTLSSpec struct {
+	CertFile string `json:"certFile"`
+	KeyFile  string `json:"keyFile"`
+	// ClientCAFile, if set, requires and verifies a client certificate on
+	// every connection (mutual TLS).
+	ClientCAFile string `json:"clientCAFile,omitempty"`
 }
 
 // TargetConfig is one Alertmanager instance to forward alerts to.
@@ -34,9 +48,26 @@ type TargetConfig struct {
 
 // ForwardConfig controls how a batch is fanned out to Targets.
 type ForwardConfig struct {
-	MinSuccess int           `json:"minSuccess"`
-	Timeout    time.Duration `json:"timeout"`
-	Retries    int           `json:"retries"`
+	MinSuccess int            `json:"minSuccess"`
+	Timeout    time.Duration  `json:"timeout"`
+	Retries    int            `json:"retries"`
+	TLS        *ClientTLSSpec `json:"tls,omitempty"`
+}
+
+// ClientTLSSpec configures TLS trust/identity for outbound connections to
+// Alertmanager targets. Applies to every Target: Alertmanager replicas in
+// one cluster normally share the same server certificate setup, so this is
+// deliberately one shared block rather than per-target.
+type ClientTLSSpec struct {
+	// CAFile trusts an additional CA (e.g. self-signed or internal)
+	// alongside the system pool.
+	CAFile string `json:"caFile,omitempty"`
+	// CertFile/KeyFile present a client certificate for mutual TLS.
+	CertFile string `json:"certFile,omitempty"`
+	KeyFile  string `json:"keyFile,omitempty"`
+	// InsecureSkipVerify disables certificate verification entirely. An
+	// explicit, discouraged escape hatch — prefer CAFile.
+	InsecureSkipVerify bool `json:"insecureSkipVerify,omitempty"`
 }
 
 // EnrichmentConfig bounds how long rule evaluation may take per batch.

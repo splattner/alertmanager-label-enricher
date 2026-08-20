@@ -6,6 +6,7 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -27,21 +28,34 @@ type State struct {
 	Cfg    *config.Config
 	Engine *engine.Engine
 	Synced func() bool // reports whether all sources have completed initial sync
+
+	// ForwardClient is used to forward batches to Alertmanager targets; it
+	// carries any TLS trust/identity built from Cfg.Forward.TLS. Nil means
+	// "use the plain default client" (no forward.tls configured).
+	ForwardClient *http.Client
+
+	// ServerTLS, if set, is the tls.Config the listener's TLS handshake
+	// should use going forward. Read by the http.Server's
+	// GetConfigForClient callback (wired up by cmd/enricher) so a config
+	// reload can rotate the server certificate/client CA without a
+	// restart; it cannot turn TLS on or off for an already-running
+	// listener.
+	ServerTLS *tls.Config
 }
 
 // Server is the enricher's HTTP server: it decodes alert batches, runs
 // them through the engine, and fans the result out to Alertmanager.
 type Server struct {
-	state atomic.Pointer[State]
-	log   *slog.Logger
-	http  *http.Client
+	state       atomic.Pointer[State]
+	log         *slog.Logger
+	defaultHTTP *http.Client
 }
 
 // New creates a Server with no state; call SetState before serving traffic.
 func New(log *slog.Logger) *Server {
 	return &Server{
-		log:  log,
-		http: &http.Client{},
+		log:         log,
+		defaultHTTP: &http.Client{},
 	}
 }
 
@@ -51,8 +65,17 @@ func (s *Server) SetState(st *State) {
 	s.state.Store(st)
 }
 
-func (s *Server) currentState() *State {
+// State returns the currently installed State, or nil before the first
+// SetState call.
+func (s *Server) State() *State {
 	return s.state.Load()
+}
+
+func (s *Server) forwardClient(st *State) *http.Client {
+	if st.ForwardClient != nil {
+		return st.ForwardClient
+	}
+	return s.defaultHTTP
 }
 
 // Handler returns the Server's http.Handler.
@@ -70,7 +93,7 @@ func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) handleReadyz(w http.ResponseWriter, _ *http.Request) {
-	st := s.currentState()
+	st := s.State()
 	if st == nil || (st.Synced != nil && !st.Synced()) {
 		http.Error(w, "not ready", http.StatusServiceUnavailable)
 		return
@@ -79,7 +102,7 @@ func (s *Server) handleReadyz(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) handleAlerts(w http.ResponseWriter, r *http.Request) {
-	st := s.currentState()
+	st := s.State()
 	if st == nil {
 		http.Error(w, "not initialized", http.StatusServiceUnavailable)
 		return
@@ -124,7 +147,7 @@ func (s *Server) handleAlerts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	status, err := s.forward(r.Context(), cfg, r.URL.Path, out, r.Header)
+	status, err := s.forward(r.Context(), cfg, s.forwardClient(st), r.URL.Path, out, r.Header)
 	if err != nil {
 		metrics.AlertsForwardedTotal.WithLabelValues("forward_failed").Inc()
 		http.Error(w, err.Error(), http.StatusBadGateway)
@@ -176,7 +199,7 @@ func recordResults(results []engine.Result) {
 // succeeds once minSuccess targets accept it — the rest are left to finish
 // in the background so one slow Alertmanager replica doesn't hold up the
 // response to Prometheus.
-func (s *Server) forward(ctx context.Context, cfg *config.Config, path string, body []byte, hdr http.Header) (int, error) {
+func (s *Server) forward(ctx context.Context, cfg *config.Config, client *http.Client, path string, body []byte, hdr http.Header) (int, error) {
 	type result struct {
 		status int
 		err    error
@@ -188,7 +211,7 @@ func (s *Server) forward(ctx context.Context, cfg *config.Config, path string, b
 		wg.Add(1)
 		go func(target string) {
 			defer wg.Done()
-			status, err := s.forwardOne(ctx, cfg.Forward.Timeout, target, path, body, hdr)
+			status, err := s.forwardOne(ctx, client, cfg.Forward.Timeout, target, path, body, hdr)
 			if err != nil {
 				metrics.ForwardErrorsTotal.WithLabelValues(target).Inc()
 			}
@@ -220,7 +243,7 @@ func (s *Server) forward(ctx context.Context, cfg *config.Config, path string, b
 	return 0, fmt.Errorf("forward: only %d/%d targets required succeeded: %w", successes, cfg.Forward.MinSuccess, lastErr)
 }
 
-func (s *Server) forwardOne(ctx context.Context, timeout time.Duration, target, path string, body []byte, hdr http.Header) (int, error) {
+func (s *Server) forwardOne(ctx context.Context, client *http.Client, timeout time.Duration, target, path string, body []byte, hdr http.Header) (int, error) {
 	start := time.Now()
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -234,7 +257,7 @@ func (s *Server) forwardOne(ctx context.Context, timeout time.Duration, target, 
 		req.Header.Set("Content-Type", "application/json")
 	}
 
-	resp, err := s.http.Do(req)
+	resp, err := client.Do(req)
 	metrics.ForwardDuration.WithLabelValues(target).Observe(time.Since(start).Seconds())
 	if err != nil {
 		return 0, fmt.Errorf("request to %s: %w", target, err)

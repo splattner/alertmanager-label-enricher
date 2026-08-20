@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -20,6 +22,7 @@ import (
 	"github.com/splattner/alertmanager-label-enricher/internal/config"
 	"github.com/splattner/alertmanager-label-enricher/internal/metrics"
 	"github.com/splattner/alertmanager-label-enricher/internal/proxy"
+	"github.com/splattner/alertmanager-label-enricher/internal/tlsutil"
 	"github.com/splattner/alertmanager-label-enricher/internal/wiring"
 )
 
@@ -71,13 +74,37 @@ func runServe(configPath string) error {
 			return err
 		}
 
+		var forwardClient *http.Client
+		if cfg.Forward.TLS != nil {
+			t := cfg.Forward.TLS
+			tlsCfg, err := tlsutil.ClientConfig(t.CAFile, t.CertFile, t.KeyFile, t.InsecureSkipVerify)
+			if err != nil {
+				return fmt.Errorf("build forward tls config: %w", err)
+			}
+			forwardClient = &http.Client{Transport: &http.Transport{TLSClientConfig: tlsCfg}}
+		}
+
+		var serverTLS *tls.Config
+		if cfg.Server.TLS != nil {
+			serverTLS, err = tlsutil.ServerConfig(cfg.Server.TLS.CertFile, cfg.Server.TLS.KeyFile, cfg.Server.TLS.ClientCAFile)
+			if err != nil {
+				return fmt.Errorf("build server tls config: %w", err)
+			}
+		}
+
 		genCtx, cancel := context.WithCancel(ctx)
 		if err := sources.Start(genCtx); err != nil {
 			cancel()
 			return err
 		}
 
-		srv.SetState(&proxy.State{Cfg: cfg, Engine: eng, Synced: sources.HasSynced})
+		srv.SetState(&proxy.State{
+			Cfg:           cfg,
+			Engine:        eng,
+			Synced:        sources.HasSynced,
+			ForwardClient: forwardClient,
+			ServerTLS:     serverTLS,
+		})
 
 		if prev := genCancel.Swap(&cancel); prev != nil {
 			(*prev)()
@@ -111,6 +138,24 @@ func runServe(configPath string) error {
 	}
 	httpSrv := &http.Server{Addr: initialCfg.Server.Listen, Handler: mux}
 
+	// Whether the listener serves TLS is fixed at startup from the initial
+	// config; a reload can rotate the certificate/key/client CA (via
+	// State.ServerTLS, read fresh on every handshake below) but cannot
+	// turn TLS on or off for an already-running listener.
+	useTLS := initialCfg.Server.TLS != nil
+	if useTLS {
+		httpSrv.TLSConfig = &tls.Config{
+			MinVersion: tls.VersionTLS12,
+			GetConfigForClient: func(*tls.ClientHelloInfo) (*tls.Config, error) {
+				st := srv.State()
+				if st == nil || st.ServerTLS == nil {
+					return nil, fmt.Errorf("server tls not configured")
+				}
+				return st.ServerTLS, nil
+			},
+		}
+	}
+
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -118,8 +163,13 @@ func runServe(configPath string) error {
 		_ = httpSrv.Shutdown(shutdownCtx)
 	}()
 
-	log.Info("listening", "addr", initialCfg.Server.Listen)
-	if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	log.Info("listening", "addr", initialCfg.Server.Listen, "tls", useTLS)
+	if useTLS {
+		err = httpSrv.ListenAndServeTLS("", "")
+	} else {
+		err = httpSrv.ListenAndServe()
+	}
+	if err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
 	return nil
