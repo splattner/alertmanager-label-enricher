@@ -1,0 +1,81 @@
+{{- if .Values.prometheusRule.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "alertmanager-label-enricher.fullname" . }}
+  labels:
+    {{- include "alertmanager-label-enricher.labels" . | nindent 4 }}
+    {{- with .Values.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: alertmanager-label-enricher
+      rules:
+        - alert: AlertmanagerLabelEnricherDown
+          expr: up{job="{{ include "alertmanager-label-enricher.fullname" . }}", namespace="{{ .Release.Namespace }}"} == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: alertmanager-label-enricher is down
+            description: >-
+              {{ "{{ $labels.instance }}" }} has been down for more than 5
+              minutes. Alerts from Prometheus cannot reach Alertmanager
+              through this path while it is down.
+
+        - alert: AlertmanagerLabelEnricherForwardFailing
+          expr: increase(ale_forward_errors_total{namespace="{{ .Release.Namespace }}"}[15m]) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: alertmanager-label-enricher is failing to forward to a target
+            description: >-
+              Target {{ "{{ $labels.target }}" }} has had
+              {{ "{{ $value }}" }} forwarding failure(s) (after exhausting
+              forward.retries) in the last 15 minutes.
+
+        - alert: AlertmanagerLabelEnricherRequiredRuleFailing
+          expr: increase(ale_rule_evaluations_total{namespace="{{ .Release.Namespace }}", result="required_failed"}[15m]) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: A required enrichment rule is failing
+            description: >-
+              Rule {{ "{{ $labels.rule }}" }} has failed as required
+              {{ "{{ $value }}" }} time(s) in the last 15 minutes. Those
+              alert batches are not being forwarded to Alertmanager, and
+              Prometheus is retrying them.
+
+        - alert: AlertmanagerLabelEnricherConfigReloadFailing
+          expr: increase(ale_config_reloads_total{namespace="{{ .Release.Namespace }}", result="error"}[15m]) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: alertmanager-label-enricher config reload is failing
+            description: >-
+              A config reload on {{ "{{ $labels.instance }}" }} failed in
+              the last 15 minutes; it is still running its previous
+              configuration. Check the pod logs for the validation error.
+
+        - alert: AlertmanagerLabelEnricherSourceLookupErrorRateHigh
+          expr: |-
+            (
+              sum by (source) (rate(ale_source_lookups_total{namespace="{{ .Release.Namespace }}", result="error"}[15m]))
+              /
+              sum by (source) (rate(ale_source_lookups_total{namespace="{{ .Release.Namespace }}"}[15m]))
+            ) > 0.1
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: High error rate looking up source {{ "{{ $labels.source }}" }}
+            description: >-
+              More than 10% of lookups against source
+              {{ "{{ $labels.source }}" }} have failed over the last 15
+              minutes. Alerts matching rules that use it may be missing
+              labels, or failing closed if the rule is required.
+{{- end }}

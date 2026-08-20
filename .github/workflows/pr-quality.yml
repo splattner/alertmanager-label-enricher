@@ -149,3 +149,16 @@ jobs:
                   grep -q 'kind: PodDisruptionBudget' /tmp/render-guardrails.yaml
                   grep -q 'kind: NetworkPolicy' /tmp/render-guardrails.yaml
                   grep -q 'kubernetes.io/metadata.name: monitoring' /tmp/render-guardrails.yaml
+
+            - name: Render chart (PrometheusRule)
+              run: |
+                  helm template ale ./charts/alertmanager-label-enricher \
+                    --set prometheusRule.enabled=true \
+                    --set-json 'prometheusRule.labels={"release":"kube-prometheus-stack"}' \
+                    > /tmp/render-prometheusrule.yaml
+                  grep -q 'kind: PrometheusRule' /tmp/render-prometheusrule.yaml
+                  grep -q 'alert: AlertmanagerLabelEnricherDown' /tmp/render-prometheusrule.yaml
+                  grep -q 'release: kube-prometheus-stack' /tmp/render-prometheusrule.yaml
+                  # The alert-templating trick ({{ "{{ $labels.x }}" }}) must
+                  # render literally, not get evaluated as a Helm variable.
+                  grep -q '{{ $labels.instance }}' /tmp/render-prometheusrule.yaml

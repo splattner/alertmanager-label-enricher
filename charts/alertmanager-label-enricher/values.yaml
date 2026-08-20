@@ -98,6 +98,16 @@ serviceMonitor:
   interval: 30s
   labels: {}
 
+prometheusRule:
+  # -- Creates a PrometheusRule with starter alerts for the enricher itself
+  # (down, forward failures, a required rule failing, config reload
+  # failures, high source-lookup error rate). Requires serviceMonitor.enabled
+  # (or equivalent scrape config) so the underlying metrics exist. `labels`
+  # is commonly needed to match your Prometheus Operator's ruleSelector,
+  # e.g. `{ release: kube-prometheus-stack }`.
+  enabled: false
+  labels: {}
+
 podDisruptionBudget:
   # -- Creates a PodDisruptionBudget. Leave disabled at the default
   # replicaCount of 1: a PDB requiring an available pod on a single-replica
