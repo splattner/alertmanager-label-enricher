@@ -2,10 +2,13 @@ package proxy
 
 import (
 	"encoding/json"
+	"encoding/pem"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +17,7 @@ import (
 	"github.com/splattner/alertmanager-label-enricher/internal/engine"
 	"github.com/splattner/alertmanager-label-enricher/internal/extract"
 	"github.com/splattner/alertmanager-label-enricher/internal/source"
+	"github.com/splattner/alertmanager-label-enricher/internal/tlsutil"
 )
 
 func discardLogger() *slog.Logger {
@@ -188,5 +192,83 @@ func TestHealthzAlwaysOK(t *testing.T) {
 	srv.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("healthz status = %d, want 200", rec.Code)
+	}
+}
+
+// tlsTargetCAFile starts an httptest TLS server and writes its certificate
+// to a PEM file under t.TempDir(), for exercising forward.tls the same way
+// a deployment would: a CA file on disk.
+func tlsTargetCAFile(t *testing.T, target *httptest.Server) string {
+	t.Helper()
+	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: target.Certificate().Raw})
+	path := filepath.Join(t.TempDir(), "ca.pem")
+	if err := os.WriteFile(path, pemBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestForwardOverTLSWithTrustedCA(t *testing.T) {
+	var received []byte
+	target := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer target.Close()
+	caFile := tlsTargetCAFile(t, target)
+
+	tlsCfg, err := tlsutil.ClientConfig(caFile, "", "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.Config{
+		Server:     config.ServerConfig{MaxBodyBytes: 1 << 20},
+		Targets:    []config.TargetConfig{{URL: target.URL}},
+		Forward:    config.ForwardConfig{MinSuccess: 1, Timeout: time.Second},
+		Enrichment: config.EnrichmentConfig{Timeout: time.Second},
+	}
+	srv := New(discardLogger())
+	srv.SetState(&State{
+		Cfg:           cfg,
+		Engine:        mustEngine(t, cfg),
+		Synced:        func() bool { return true },
+		ForwardClient: &http.Client{Transport: &http.Transport{TLSClientConfig: tlsCfg}},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v2/alerts", strings.NewReader(`[{"labels":{"alertname":"Test"}}]`))
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if len(received) == 0 {
+		t.Fatal("target received no body")
+	}
+}
+
+func TestForwardOverTLSWithoutTrustedCAFails(t *testing.T) {
+	target := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer target.Close()
+
+	// No forward.tls configured: the default client only trusts the
+	// system pool, which does not include the test server's certificate.
+	cfg := &config.Config{
+		Server:     config.ServerConfig{MaxBodyBytes: 1 << 20},
+		Targets:    []config.TargetConfig{{URL: target.URL}},
+		Forward:    config.ForwardConfig{MinSuccess: 1, Timeout: time.Second},
+		Enrichment: config.EnrichmentConfig{Timeout: time.Second},
+	}
+	srv := newTestServer(t, cfg)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v2/alerts", strings.NewReader(`[{"labels":{"alertname":"Test"}}]`))
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502 (untrusted certificate)", rec.Code)
 	}
 }

@@ -69,6 +69,40 @@ A rule with `required: true` fails the whole batch closed (503, so
 Prometheus retries) if its lookup fails and no `default` is set. Every
 other rule fails open: forward the alert as-is rather than block delivery.
 
+### TLS
+
+Alertmanager itself can serve TLS (via `--web.config.file`), so both sides
+of the enricher support it too:
+
+```yaml
+server:
+  listen: ":9099"
+  tls:
+    certFile: /etc/enricher/tls/tls.crt
+    keyFile: /etc/enricher/tls/tls.key
+    clientCAFile: /etc/enricher/tls/ca.crt   # optional: require+verify client certs (mTLS)
+
+targets:
+  - url: https://alertmanager:9093
+forward:
+  tls:
+    caFile: /etc/enricher/forward-tls/ca.crt     # trust a self-signed/internal Alertmanager CA
+    certFile: /etc/enricher/forward-tls/tls.crt  # optional: present a client cert (mTLS to Alertmanager)
+    keyFile: /etc/enricher/forward-tls/tls.key
+```
+
+`server.tls` is fixed at startup — a hot reload rotates the certificate,
+key, or client CA (useful for cert-manager-style renewal) but cannot turn
+TLS on or off without a restart. `forward.tls` is a single shared block, not
+per-target: Alertmanager replicas in one cluster normally share the same
+server certificate setup.
+
+In the Helm chart, set `tls.server.enabled`/`tls.server.existingSecret` and
+`tls.forward.enabled`/`tls.forward.existingSecret` — the paths above
+(`/etc/enricher/tls`, `/etc/enricher/forward-tls`) are exactly where it
+mounts them, and it switches the liveness/readiness probes to HTTPS
+automatically when `tls.server.enabled` is set.
+
 ## Running
 
 ```sh

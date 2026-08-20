@@ -42,10 +42,16 @@ spec:
             httpGet:
               path: /healthz
               port: http
+              {{- if .Values.tls.server.enabled }}
+              scheme: HTTPS
+              {{- end }}
           readinessProbe:
             httpGet:
               path: /readyz
               port: http
+              {{- if .Values.tls.server.enabled }}
+              scheme: HTTPS
+              {{- end }}
           {{- with .Values.extraEnv }}
           env:
             {{- toYaml . | nindent 12 }}
@@ -54,6 +60,16 @@ spec:
             - name: config
               mountPath: /etc/enricher
               readOnly: true
+            {{- if .Values.tls.server.enabled }}
+            - name: server-tls
+              mountPath: /etc/enricher/tls
+              readOnly: true
+            {{- end }}
+            {{- if .Values.tls.forward.enabled }}
+            - name: forward-tls
+              mountPath: /etc/enricher/forward-tls
+              readOnly: true
+            {{- end }}
             {{- with .Values.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -63,6 +79,16 @@ spec:
         - name: config
           configMap:
             name: {{ include "alertmanager-label-enricher.fullname" . }}
+        {{- if .Values.tls.server.enabled }}
+        - name: server-tls
+          secret:
+            secretName: {{ required "tls.server.existingSecret is required when tls.server.enabled is true" .Values.tls.server.existingSecret }}
+        {{- end }}
+        {{- if .Values.tls.forward.enabled }}
+        - name: forward-tls
+          secret:
+            secretName: {{ required "tls.forward.existingSecret is required when tls.forward.enabled is true" .Values.tls.forward.existingSecret }}
+        {{- end }}
         {{- with .Values.extraVolumes }}
         {{- toYaml . | nindent 8 }}
         {{- end }}

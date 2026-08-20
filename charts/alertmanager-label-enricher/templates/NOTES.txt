@@ -11,3 +11,11 @@ changes via a checksum annotation.
 
 If any source has type `kubernetes`, set `rbac.create=true` and list the
 GVRs it needs under `rbac.rules`.
+
+For TLS, set `tls.server.enabled=true` with `tls.server.existingSecret` (a
+kubernetes.io/tls Secret) to serve HTTPS — mounted at /etc/enricher/tls, so
+reference it from `config` as `server.tls.certFile: /etc/enricher/tls/tls.crt`
+(and `.../tls.key`, plus `.../ca.crt` for mTLS if the secret has one).
+Set `tls.forward.enabled=true` with `tls.forward.existingSecret` the same
+way (mounted at /etc/enricher/forward-tls) to trust a custom Alertmanager CA
+or present a client certificate.

@@ -96,6 +96,40 @@ func TestValidateRejectsDuplicateSourceNames(t *testing.T) {
 	assertRejects(t, cfg, "duplicate source name")
 }
 
+func TestValidateAcceptsServerTLSWithCertAndKey(t *testing.T) {
+	cfg := validConfig()
+	cfg.Server.TLS = &ServerTLSSpec{CertFile: "cert.pem", KeyFile: "key.pem"}
+	if err := Validate(cfg); err != nil {
+		t.Fatalf("expected valid config to pass, got: %v", err)
+	}
+}
+
+func TestValidateRejectsServerTLSMissingKey(t *testing.T) {
+	cfg := validConfig()
+	cfg.Server.TLS = &ServerTLSSpec{CertFile: "cert.pem"}
+	assertRejects(t, cfg, "server.tls")
+}
+
+func TestValidateRejectsServerTLSMissingCert(t *testing.T) {
+	cfg := validConfig()
+	cfg.Server.TLS = &ServerTLSSpec{KeyFile: "key.pem"}
+	assertRejects(t, cfg, "server.tls")
+}
+
+func TestValidateAcceptsForwardTLSCAOnly(t *testing.T) {
+	cfg := validConfig()
+	cfg.Forward.TLS = &ClientTLSSpec{CAFile: "ca.pem"}
+	if err := Validate(cfg); err != nil {
+		t.Fatalf("expected valid config to pass, got: %v", err)
+	}
+}
+
+func TestValidateRejectsForwardTLSUnpairedClientCert(t *testing.T) {
+	cfg := validConfig()
+	cfg.Forward.TLS = &ClientTLSSpec{CertFile: "client.pem"}
+	assertRejects(t, cfg, "forward.tls")
+}
+
 func assertRejects(t *testing.T, cfg *Config, wantSubstr string) {
 	t.Helper()
 	err := Validate(cfg)
