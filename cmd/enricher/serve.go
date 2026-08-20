@@ -49,7 +49,7 @@ func runServe(configPath string) error {
 
 	var genCancel atomic.Pointer[context.CancelFunc]
 
-	reload := func() error {
+	applyConfig := func() error {
 		cfg, err := config.Load(configPath)
 		if err != nil {
 			return err
@@ -112,6 +112,8 @@ func runServe(configPath string) error {
 		return nil
 	}
 
+	reload := recordReload(applyConfig)
+
 	if err := reload(); err != nil {
 		return fmt.Errorf("initial config load: %w", err)
 	}
@@ -173,6 +175,22 @@ func runServe(configPath string) error {
 		return err
 	}
 	return nil
+}
+
+// recordReload wraps fn (a config-apply attempt) so every reload trigger -
+// initial load, SIGHUP/file watch, POST /-/reload - reports through the
+// same ale_config_reloads_total/ale_config_reload_success_timestamp_seconds
+// metrics regardless of what triggered it.
+func recordReload(fn func() error) func() error {
+	return func() error {
+		if err := fn(); err != nil {
+			metrics.ConfigReloadsTotal.WithLabelValues("error").Inc()
+			return err
+		}
+		metrics.ConfigReloadsTotal.WithLabelValues("ok").Inc()
+		metrics.ConfigReloadSuccessTimestamp.Set(float64(time.Now().Unix()))
+		return nil
+	}
 }
 
 // watchReload triggers reload on SIGHUP and on changes to the config

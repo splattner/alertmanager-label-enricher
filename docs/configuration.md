@@ -22,6 +22,7 @@ This is the complete reference for `config.yaml`. For a quick start, see the
 - [jq extraction](#jq-extraction)
 - [Durations](#durations)
 - [Environment variable expansion](#environment-variable-expansion)
+- [Metrics](#metrics)
 - [Reloading](#reloading)
 
 ## Top-level structure
@@ -272,7 +273,7 @@ the one thing about rule semantics most likely to surprise a new reader.
 
 | Situation | `required: false` (default) | `required: true` |
 |---|---|---|
-| Lookup errors (timeout, non-2xx, RBAC denied, file not loaded) | skip this action, log a warning | whole batch fails closed: `503`, so Prometheus retries |
+| Lookup errors (timeout, non-2xx, RBAC denied, file not loaded) | skip this action, log a warning + `ale_source_lookups_total{result="error"}` | whole batch fails closed: `503`, so Prometheus retries + `ale_rule_evaluations_total{result="required_failed"}` |
 | Lookup succeeds but resolves to "not found" (K8s object missing, HTTP `404`, jq/regex yields nothing) and `default` is set | apply `default` | apply `default` |
 | Same, but no `default` set | skip this action | whole batch fails closed: `503` |
 
@@ -346,6 +347,33 @@ unset variable is left as the literal `${VAR_NAME}` text rather than
 becoming an empty string, so a typo'd name fails loudly (as unexpected
 config content, or downstream at the source it's used in) instead of
 silently sending an empty header.
+
+## Metrics
+
+Served at `/metrics`, all under the `ale_` prefix:
+
+| Metric | Labels | What it means |
+|---|---|---|
+| `ale_alerts_received_total` | — | alerts received from Prometheus, before enrichment |
+| `ale_alerts_forwarded_total` | `result` (`ok`\|`required_failed`\|`decode_error`\|`forward_failed`) | alert batches, by outcome |
+| `ale_rule_evaluations_total` | `rule`, `result` (`matched`\|`skipped`\|`required_failed`) | one rule's evaluation against one alert |
+| `ale_labels_added_total` | `rule`, `label` | a label newly added |
+| `ale_labels_overwritten_total` | `rule`, `label` | an existing label replaced — fingerprint-changing |
+| `ale_labels_dropped_total` | `rule`, `label` | a label removed — fingerprint-changing |
+| `ale_source_lookups_total` | `source`, `result` (`hit`\|`miss`\|`error`) | a source `Lookup()` call: resolved to a value, resolved to nothing, or errored |
+| `ale_source_lookup_duration_seconds` | `source` | latency of a source `Lookup()` call (cache hit and cold fetch both included) |
+| `ale_forward_duration_seconds` | `target` | latency of one forward attempt to one target |
+| `ale_forward_errors_total` | `target` | a target failed after exhausting `forward.retries` |
+| `ale_forward_retries_total` | `target` | a retry attempt was made against a target |
+| `ale_config_reloads_total` | `result` (`ok`\|`error`) | a config reload attempt, from any trigger (initial load, `SIGHUP`, file watch, `POST /-/reload`) |
+| `ale_config_reload_success_timestamp_seconds` | — | unix time of the last successful reload |
+
+`ale_labels_overwritten_total`/`ale_labels_dropped_total` exist specifically
+to make the fingerprint-changing blast radius from [`overwrite`](#actions)
+and `drop` observable. `ale_source_lookups_total{result="hit"}` staying
+high while your Kubernetes API server's request rate stays flat across
+Prometheus's resend cycle is the metric that proves the
+[Kubernetes source](#kubernetes-source)'s caching is doing its job.
 
 ## Reloading
 
