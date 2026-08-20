@@ -43,6 +43,24 @@ var (
 		Help:      "Labels dropped from an alert, by rule and label. Dropping changes the alert's fingerprint in Alertmanager.",
 	}, []string{"rule", "label"})
 
+	AnnotationsAddedTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "annotations_added_total",
+		Help:      "Annotations newly added to an alert, by rule and annotation. Informational only: unlike labels, annotations never change the alert's fingerprint.",
+	}, []string{"rule", "annotation"})
+
+	AnnotationsOverwrittenTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "annotations_overwritten_total",
+		Help:      "Existing annotations overwritten on an alert, by rule and annotation. Informational only: unlike labels, annotations never change the alert's fingerprint.",
+	}, []string{"rule", "annotation"})
+
+	AnnotationsDroppedTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "annotations_dropped_total",
+		Help:      "Annotations dropped from an alert, by rule and annotation. Informational only: unlike labels, annotations never change the alert's fingerprint.",
+	}, []string{"rule", "annotation"})
+
 	SourceLookupsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace,
 		Name:      "source_lookups_total",
@@ -98,6 +116,9 @@ func Registry() *prometheus.Registry {
 		LabelsAddedTotal,
 		LabelsOverwrittenTotal,
 		LabelsDroppedTotal,
+		AnnotationsAddedTotal,
+		AnnotationsOverwrittenTotal,
+		AnnotationsDroppedTotal,
 		SourceLookupsTotal,
 		SourceLookupDuration,
 		ForwardDuration,

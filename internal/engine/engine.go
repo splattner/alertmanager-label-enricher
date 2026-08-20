@@ -22,27 +22,34 @@ type Sources interface {
 }
 
 // Result records what happened evaluating one rule against one alert, for
-// metrics and dry-run logging.
+// metrics and dry-run logging. The Annotations* slices mirror their label
+// counterparts but carry no fingerprint-blast-radius meaning: overwriting
+// or dropping an annotation never changes how Alertmanager identifies the
+// alert.
 type Result struct {
-	Rule           string
-	Skipped        bool // matchers did not match
-	RequiredFailed bool // a required action in this rule could not be satisfied
-	DryRun         bool
-	Added          []string
-	Overwritten    []string
-	Dropped        []string
+	Rule                   string
+	Skipped                bool // matchers did not match
+	RequiredFailed         bool // a required action in this rule could not be satisfied
+	DryRun                 bool
+	Added                  []string
+	Overwritten            []string
+	Dropped                []string
+	AnnotationsAdded       []string
+	AnnotationsOverwritten []string
+	AnnotationsDropped     []string
 }
 
 // RequiredFailure is returned when a `required: true` rule could not be
 // satisfied; the caller (proxy handler) must fail the whole batch closed.
 type RequiredFailure struct {
 	Rule   string
-	Label  string
+	Kind   string // "label" or "annotation"
+	Target string
 	Reason error
 }
 
 func (e *RequiredFailure) Error() string {
-	return fmt.Sprintf("rule %q: required label %q could not be set: %v", e.Rule, e.Label, e.Reason)
+	return fmt.Sprintf("rule %q: required %s %q could not be set: %v", e.Rule, e.Kind, e.Target, e.Reason)
 }
 func (e *RequiredFailure) Unwrap() error { return e.Reason }
 
@@ -118,7 +125,10 @@ func (e *Engine) Apply(ctx context.Context, a alert.Alert) ([]Result, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read labels: %w", err)
 	}
-	annotations := a.Annotations()
+	annotations, err := a.Annotations()
+	if err != nil {
+		return nil, fmt.Errorf("read annotations: %w", err)
+	}
 
 	var results []Result
 	for _, rule := range e.rules {
@@ -133,11 +143,16 @@ func (e *Engine) Apply(ctx context.Context, a alert.Alert) ([]Result, error) {
 			if action.Drop == nil {
 				continue
 			}
-			if _, exists := labels[action.Drop.Label]; exists {
+			m, name, isAnnotation := target(labels, annotations, action.Drop.Label, action.Drop.Annotation)
+			if _, exists := m[name]; exists {
 				if !rule.spec.DryRun {
-					delete(labels, action.Drop.Label)
+					delete(m, name)
 				}
-				res.Dropped = append(res.Dropped, action.Drop.Label)
+				if isAnnotation {
+					res.AnnotationsDropped = append(res.AnnotationsDropped, name)
+				} else {
+					res.Dropped = append(res.Dropped, name)
+				}
 			}
 		}
 
@@ -147,29 +162,50 @@ func (e *Engine) Apply(ctx context.Context, a alert.Alert) ([]Result, error) {
 				if rule.spec.Required {
 					res.RequiredFailed = true
 					results = append(results, res)
-					return results, &RequiredFailure{Rule: rule.spec.Name, Label: set.spec.Label, Reason: err}
+					kind, targetName := "label", set.spec.Label
+					if set.spec.Annotation != "" {
+						kind, targetName = "annotation", set.spec.Annotation
+					}
+					return results, &RequiredFailure{Rule: rule.spec.Name, Kind: kind, Target: targetName, Reason: err}
 				}
 				continue
 			}
 
-			_, exists := labels[set.spec.Label]
+			m, name, isAnnotation := target(labels, annotations, set.spec.Label, set.spec.Annotation)
+			_, exists := m[name]
 			if exists && !set.spec.Overwrite {
 				continue
 			}
 
 			if !rule.spec.DryRun {
-				labels[set.spec.Label] = value
+				m[name] = value
 			}
-			if exists {
-				res.Overwritten = append(res.Overwritten, set.spec.Label)
-			} else {
-				res.Added = append(res.Added, set.spec.Label)
+			switch {
+			case isAnnotation && exists:
+				res.AnnotationsOverwritten = append(res.AnnotationsOverwritten, name)
+			case isAnnotation:
+				res.AnnotationsAdded = append(res.AnnotationsAdded, name)
+			case exists:
+				res.Overwritten = append(res.Overwritten, name)
+			default:
+				res.Added = append(res.Added, name)
 			}
 		}
 
 		results = append(results, res)
 	}
 	return results, nil
+}
+
+// target resolves which map (labels or annotations) a set/drop action
+// addresses, and the action's name within that map. config.Validate
+// enforces that exactly one of label/annotation is set, so annotation
+// being non-empty alone decides it.
+func target(labels, annotations map[string]string, label, annotation string) (m map[string]string, name string, isAnnotation bool) {
+	if annotation != "" {
+		return annotations, annotation, true
+	}
+	return labels, label, false
 }
 
 // resolveValue computes a set action's value. ok=false means "no value
@@ -183,7 +219,7 @@ func (e *Engine) resolveValue(ctx context.Context, set compiledSet, labels, anno
 		return spec.Value, true, nil
 
 	case spec.Template != "":
-		v, err := tmpl.Render(spec.Label, spec.Template, tmpl.Data{Labels: labels, Annotations: annotations})
+		v, err := tmpl.Render(setName(spec), spec.Template, tmpl.Data{Labels: labels, Annotations: annotations})
 		if err != nil {
 			return "", false, err
 		}
@@ -228,8 +264,17 @@ func (e *Engine) resolveValue(ctx context.Context, set compiledSet, labels, anno
 		return value, true, nil
 
 	default:
-		return "", false, fmt.Errorf("set action for label %q has no value source", spec.Label)
+		return "", false, fmt.Errorf("set action for %q has no value source", setName(spec))
 	}
+}
+
+// setName returns whichever of Label/Annotation a SetAction targets, for
+// error messages and template naming.
+func setName(spec config.SetAction) string {
+	if spec.Annotation != "" {
+		return spec.Annotation
+	}
+	return spec.Label
 }
 
 func matches(ms []compiledMatch, labels map[string]string) bool {

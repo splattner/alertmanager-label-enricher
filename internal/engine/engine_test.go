@@ -267,7 +267,7 @@ func TestRequiredRuleFailsBatchClosed(t *testing.T) {
 	if !errors.As(err, &reqFail) {
 		t.Fatalf("Apply err = %v, want a *RequiredFailure", err)
 	}
-	if reqFail.Rule != "required-tier" || reqFail.Label != "tier" {
+	if reqFail.Rule != "required-tier" || reqFail.Kind != "label" || reqFail.Target != "tier" {
 		t.Fatalf("RequiredFailure = %+v", reqFail)
 	}
 }
@@ -335,5 +335,159 @@ func TestApplyRecordsSourceLookupMetrics(t *testing.T) {
 				t.Fatalf("ale_source_lookups_total{source=%q,result=%q} = %v, want %v", tt.src.name, tt.wantResult, after, before+1)
 			}
 		})
+	}
+}
+
+func TestApplySetsAnnotation(t *testing.T) {
+	cfg := &config.Config{
+		Targets: []config.TargetConfig{{URL: "http://x"}},
+		Rules: []config.RuleConfig{{
+			Name:    "runbook",
+			Actions: []config.ActionConfig{{Set: &config.SetAction{Annotation: "runbook_url", Value: "https://wiki/runbook"}}},
+		}},
+	}
+	eng := compile(t, cfg, fakeRegistry{})
+	a := newAlert(map[string]string{"alertname": "Test"})
+
+	results, err := eng.Apply(context.Background(), a)
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if len(results) != 1 || len(results[0].AnnotationsAdded) != 1 || results[0].AnnotationsAdded[0] != "runbook_url" {
+		t.Fatalf("results = %+v", results)
+	}
+	if len(results[0].Added) != 0 {
+		t.Fatalf("annotation set must not also count as a label add: %+v", results[0])
+	}
+
+	annotations, err := a.Annotations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if annotations["runbook_url"] != "https://wiki/runbook" {
+		t.Fatalf("annotations = %v", annotations)
+	}
+}
+
+func TestApplyOverwriteGuardAppliesToAnnotations(t *testing.T) {
+	cfg := &config.Config{
+		Targets: []config.TargetConfig{{URL: "http://x"}},
+		Rules: []config.RuleConfig{{
+			Name:    "runbook",
+			Actions: []config.ActionConfig{{Set: &config.SetAction{Annotation: "runbook_url", Value: "https://wiki/new"}}},
+		}},
+	}
+	eng := compile(t, cfg, fakeRegistry{})
+	a := alert.Alert{
+		"labels":      map[string]any{"alertname": "Test"},
+		"annotations": map[string]any{"runbook_url": "https://wiki/old"},
+	}
+
+	results, err := eng.Apply(context.Background(), a)
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if len(results[0].AnnotationsAdded) != 0 || len(results[0].AnnotationsOverwritten) != 0 {
+		t.Fatalf("expected no-op without overwrite:true, got %+v", results[0])
+	}
+	annotations, _ := a.Annotations()
+	if annotations["runbook_url"] != "https://wiki/old" {
+		t.Fatalf("annotation must not change without overwrite:true, got %v", annotations["runbook_url"])
+	}
+
+	cfg.Rules[0].Actions[0].Set.Overwrite = true
+	eng = compile(t, cfg, fakeRegistry{})
+	results, err = eng.Apply(context.Background(), a)
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if len(results[0].AnnotationsOverwritten) != 1 || results[0].AnnotationsOverwritten[0] != "runbook_url" {
+		t.Fatalf("results = %+v", results[0])
+	}
+	annotations, _ = a.Annotations()
+	if annotations["runbook_url"] != "https://wiki/new" {
+		t.Fatalf("annotation = %v, want it overwritten", annotations["runbook_url"])
+	}
+}
+
+func TestApplyDropsAnnotation(t *testing.T) {
+	cfg := &config.Config{
+		Targets: []config.TargetConfig{{URL: "http://x"}},
+		Rules: []config.RuleConfig{{
+			Name:    "strip-description",
+			Actions: []config.ActionConfig{{Drop: &config.DropAction{Annotation: "description"}}},
+		}},
+	}
+	eng := compile(t, cfg, fakeRegistry{})
+	a := alert.Alert{
+		"labels":      map[string]any{"alertname": "Test"},
+		"annotations": map[string]any{"description": "a very long description"},
+	}
+
+	results, err := eng.Apply(context.Background(), a)
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if len(results[0].AnnotationsDropped) != 1 || results[0].AnnotationsDropped[0] != "description" {
+		t.Fatalf("results = %+v", results[0])
+	}
+	annotations, _ := a.Annotations()
+	if _, exists := annotations["description"]; exists {
+		t.Fatal("description annotation should have been dropped")
+	}
+}
+
+func TestApplyChainedRulesSeeAnnotationsWrittenByEarlierRules(t *testing.T) {
+	// This is the test that would catch a regression back to Annotations()
+	// returning a detached copy: if rule 2's template read a stale copy
+	// instead of the alert's real storage, it would never see what rule 1
+	// wrote.
+	cfg := &config.Config{
+		Targets: []config.TargetConfig{{URL: "http://x"}},
+		Rules: []config.RuleConfig{
+			{Name: "set-owner", Actions: []config.ActionConfig{{Set: &config.SetAction{Annotation: "owner", Value: "platform-team"}}}},
+			{Name: "set-summary", Actions: []config.ActionConfig{{Set: &config.SetAction{
+				Annotation: "summary", Template: "owned by {{ .Annotations.owner }}",
+			}}}},
+		},
+	}
+	eng := compile(t, cfg, fakeRegistry{})
+	a := newAlert(map[string]string{"alertname": "Test"})
+
+	if _, err := eng.Apply(context.Background(), a); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	annotations, err := a.Annotations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if annotations["summary"] != "owned by platform-team" {
+		t.Fatalf("summary = %q, want the second rule to see the first rule's annotation", annotations["summary"])
+	}
+}
+
+func TestApplyRequiredFailureNamesAnnotation(t *testing.T) {
+	cfg := &config.Config{
+		Targets: []config.TargetConfig{{URL: "http://x"}},
+		Sources: []config.SourceConfig{{Name: "cmdb", Type: "http", HTTP: &config.HTTPSourceSpec{URL: "http://x", AllowedHosts: []string{"x"}}}},
+		Rules: []config.RuleConfig{{
+			Name:     "required-runbook",
+			Required: true,
+			Actions: []config.ActionConfig{{Set: &config.SetAction{
+				Annotation: "runbook_url",
+				From:       &config.FromConfig{Source: "cmdb", Jq: `.runbook`},
+			}}},
+		}},
+	}
+	reg := fakeRegistry{"cmdb": &fakeSource{name: "cmdb", err: errors.New("backend unreachable")}}
+	eng := compile(t, cfg, reg)
+
+	_, err := eng.Apply(context.Background(), newAlert(nil))
+	var reqFail *RequiredFailure
+	if !errors.As(err, &reqFail) {
+		t.Fatalf("Apply err = %v, want a *RequiredFailure", err)
+	}
+	if reqFail.Kind != "annotation" || reqFail.Target != "runbook_url" {
+		t.Fatalf("RequiredFailure = %+v", reqFail)
 	}
 }

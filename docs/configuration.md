@@ -216,6 +216,7 @@ rules).
 ### `actions`
 
 Exactly one action per entry: `set` or `drop`, evaluated in list order.
+Each of those targets **exactly one** of `label` or `annotation`.
 
 ```yaml
 actions:
@@ -241,15 +242,35 @@ actions:
   # remove a label
   - drop: { label: pod }
   # drop: { label: alertname, force: true }   # reserved labels need force: true
+
+  # annotations work the same way, but target `annotation` instead of `label`
+  - set:
+      annotation: runbook_url
+      from: { source: cmdb, jq: '.runbook' }
+  - drop: { annotation: description }
 ```
 
-`set.label` requires **exactly one** of `value`, `template`, or `from`.
-Adding a label that doesn't yet exist is always allowed. **Overwriting**
-one that does requires `overwrite: true`; **dropping** a label is always an
-explicit action already. Both change the alert's fingerprint in
-Alertmanager, which can invalidate existing silences — `ale_labels_overwritten_total`
-and `ale_labels_dropped_total` (by rule and label) exist specifically to
-make that blast radius observable.
+`set` requires **exactly one** of `value`, `template`, or `from`. Adding a
+label/annotation that doesn't yet exist is always allowed. **Overwriting**
+one that does requires `overwrite: true`; **dropping** is always an
+explicit action already.
+
+For **labels**, both overwrite and drop change the alert's fingerprint in
+Alertmanager, which can invalidate existing silences —
+`ale_labels_overwritten_total` and `ale_labels_dropped_total` (by rule and
+label) exist specifically to make that blast radius observable. For
+**annotations**, neither does: annotations are free-form context
+Alertmanager passes through to notifications, with no effect on how the
+alert is identified. `ale_annotations_added_total` /
+`ale_annotations_overwritten_total` / `ale_annotations_dropped_total`
+exist purely as informational counters — there's no equivalent guard
+needed, and `force` (see below) is rejected on an annotation action as
+not applicable rather than silently ignored.
+
+If you find yourself reaching for a label just to carry human-facing
+context (a runbook link, an owning Slack channel, a dashboard URL) that
+you don't need to route or group on, that's what annotations are for —
+using a label for it means paying the fingerprint cost for no benefit.
 
 ### Reserved labels
 
@@ -259,6 +280,10 @@ config-validation time unless the action also sets `force: true` — a
 second, distinct opt-in on top of `overwrite`, since this is rarely
 intentional and more consequential than touching an ordinary label. Adding
 `alertname` when it's not already present (no `overwrite`) is unaffected.
+
+This guard is label-only. `set: { annotation: alertname, ... }` is legal
+and unremarkable — an annotation named `alertname` has no bearing on the
+alert's actual identifying label and carries no fingerprint risk.
 
 ### Evaluation order
 
@@ -360,6 +385,9 @@ Served at `/metrics`, all under the `ale_` prefix:
 | `ale_labels_added_total` | `rule`, `label` | a label newly added |
 | `ale_labels_overwritten_total` | `rule`, `label` | an existing label replaced — fingerprint-changing |
 | `ale_labels_dropped_total` | `rule`, `label` | a label removed — fingerprint-changing |
+| `ale_annotations_added_total` | `rule`, `annotation` | an annotation newly added — informational only, no fingerprint change |
+| `ale_annotations_overwritten_total` | `rule`, `annotation` | an existing annotation replaced — informational only |
+| `ale_annotations_dropped_total` | `rule`, `annotation` | an annotation removed — informational only |
 | `ale_source_lookups_total` | `source`, `result` (`hit`\|`miss`\|`error`) | a source `Lookup()` call: resolved to a value, resolved to nothing, or errored |
 | `ale_source_lookup_duration_seconds` | `source` | latency of a source `Lookup()` call (cache hit and cold fetch both included) |
 | `ale_forward_duration_seconds` | `target` | latency of one forward attempt to one target |

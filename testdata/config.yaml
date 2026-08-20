@@ -40,3 +40,11 @@ rules:
     match: [ { label: cluster, op: regex, value: 'prod-.*' } ]
     actions:
       - set: { label: environment, value: production }
+
+  - name: runbook-from-team
+    match:
+      - { label: team, op: exists }
+    actions:
+      - set:
+          annotation: runbook_url
+          template: 'https://wiki.internal/runbooks/{{ .Labels.team }}'

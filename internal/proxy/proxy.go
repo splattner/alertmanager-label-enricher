@@ -210,6 +210,15 @@ func recordResults(results []engine.Result) {
 		for _, l := range res.Dropped {
 			metrics.LabelsDroppedTotal.WithLabelValues(res.Rule, l).Inc()
 		}
+		for _, an := range res.AnnotationsAdded {
+			metrics.AnnotationsAddedTotal.WithLabelValues(res.Rule, an).Inc()
+		}
+		for _, an := range res.AnnotationsOverwritten {
+			metrics.AnnotationsOverwrittenTotal.WithLabelValues(res.Rule, an).Inc()
+		}
+		for _, an := range res.AnnotationsDropped {
+			metrics.AnnotationsDroppedTotal.WithLabelValues(res.Rule, an).Inc()
+		}
 	}
 }
 

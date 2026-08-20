@@ -1,6 +1,8 @@
 // Package alert decodes and re-encodes Prometheus alert batches while
-// preserving every field, known or not, except the labels map it exists to
-// mutate.
+// preserving every field, known or not, except the labels/annotations maps
+// it exists to mutate. An alert with no annotations at all gains an empty
+// "annotations":{} once Annotations() is called on it (mirroring Labels()),
+// which Alertmanager treats identically to the field being absent.
 package alert
 
 import (
@@ -42,26 +44,33 @@ func (a Alert) Labels() (map[string]string, error) {
 	}
 }
 
-// Annotations returns the alert's annotation map, read-only for the purposes
-// of this package (used only as templating/jq input).
-func (a Alert) Annotations() map[string]string {
+// Annotations returns the alert's annotation map, creating it if absent.
+// The returned map aliases the alert's own storage, so mutations are
+// visible immediately - mirroring Labels().
+func (a Alert) Annotations() (map[string]string, error) {
 	raw, ok := a["annotations"]
 	if !ok || raw == nil {
-		return nil
+		annotations := map[string]string{}
+		a["annotations"] = annotations
+		return annotations, nil
 	}
+
 	switch v := raw.(type) {
 	case map[string]string:
-		return v
+		return v, nil
 	case map[string]any:
-		out := make(map[string]string, len(v))
+		annotations := make(map[string]string, len(v))
 		for k, val := range v {
-			if s, ok := val.(string); ok {
-				out[k] = s
+			s, ok := val.(string)
+			if !ok {
+				return nil, fmt.Errorf("annotation %q has non-string value %T", k, val)
 			}
+			annotations[k] = s
 		}
-		return out
+		a["annotations"] = annotations
+		return annotations, nil
 	default:
-		return nil
+		return nil, fmt.Errorf("annotations field has unexpected type %T", raw)
 	}
 }
 

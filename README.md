@@ -68,6 +68,13 @@ one changes the alert's fingerprint in Alertmanager — which can invalidate
 existing silences — so both require `overwrite: true` (on `set`) or an
 explicit `drop` action.
 
+`set` and `drop` can target an `annotation` instead of a `label`
+(`set: { annotation: runbook_url, value: ... }`). Annotations carry no
+fingerprint risk — they're free-form context Alertmanager passes through
+to notifications — so overwriting or dropping one needs no extra opt-in.
+If you're enriching with something purely human-facing (a runbook link, an
+owning Slack channel), prefer an annotation over a label.
+
 **Reserved labels.** `alertname` is Alertmanager's primary identifying
 label; overwriting or dropping it is rarely intentional. Config validation
 rejects a `set` action with `overwrite: true` or a `drop` action targeting
@@ -157,12 +164,19 @@ its initial sync. Metrics are served at `/metrics`.
 
 ## Deploying
 
-A Helm chart is in [charts/alertmanager-label-enricher](charts/alertmanager-label-enricher):
+The Helm chart ([charts/alertmanager-label-enricher](charts/alertmanager-label-enricher)) is published via chart-releaser to a Helm repo hosted on GitHub Pages:
 
 ```sh
-helm install ale ./charts/alertmanager-label-enricher \
+helm repo add alertmanager-label-enricher https://splattner.github.io/alertmanager-label-enricher
+helm repo update
+helm install ale alertmanager-label-enricher/alertmanager-label-enricher \
   --set-file config=config.yaml
 ```
+
+Use `helm search repo alertmanager-label-enricher --versions` to see available
+versions, or pass `--version` to pin one. For chart development, `helm
+install`/`helm template` against the local `./charts/alertmanager-label-enricher`
+path instead.
 
 If any source has type `kubernetes`, set `rbac.create=true` and list the
 resources it needs under `rbac.rules`. Plain manifests are also available

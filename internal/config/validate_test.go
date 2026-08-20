@@ -167,6 +167,69 @@ func TestValidateAcceptsAddingReservedLabelWithoutForce(t *testing.T) {
 	}
 }
 
+func TestValidateAcceptsSetAnnotation(t *testing.T) {
+	cfg := validConfig()
+	cfg.Rules[0].Actions[0].Set = &SetAction{Annotation: "runbook_url", Value: "https://wiki/runbook"}
+	if err := Validate(cfg); err != nil {
+		t.Fatalf("expected valid config to pass, got: %v", err)
+	}
+}
+
+func TestValidateAcceptsDropAnnotation(t *testing.T) {
+	cfg := validConfig()
+	cfg.Rules[0].Actions = []ActionConfig{{Drop: &DropAction{Annotation: "description"}}}
+	if err := Validate(cfg); err != nil {
+		t.Fatalf("expected valid config to pass, got: %v", err)
+	}
+}
+
+func TestValidateRejectsSetWithBothLabelAndAnnotation(t *testing.T) {
+	cfg := validConfig()
+	cfg.Rules[0].Actions[0].Set = &SetAction{Label: "team", Annotation: "runbook_url", Value: "x"}
+	assertRejects(t, cfg, "exactly one of label or annotation")
+}
+
+func TestValidateRejectsSetWithNeitherLabelNorAnnotation(t *testing.T) {
+	cfg := validConfig()
+	cfg.Rules[0].Actions[0].Set = &SetAction{Value: "x"}
+	assertRejects(t, cfg, "exactly one of label or annotation")
+}
+
+func TestValidateRejectsDropWithBothLabelAndAnnotation(t *testing.T) {
+	cfg := validConfig()
+	cfg.Rules[0].Actions = []ActionConfig{{Drop: &DropAction{Label: "pod", Annotation: "description"}}}
+	assertRejects(t, cfg, "exactly one of label or annotation")
+}
+
+func TestValidateRejectsDropWithNeitherLabelNorAnnotation(t *testing.T) {
+	cfg := validConfig()
+	cfg.Rules[0].Actions = []ActionConfig{{Drop: &DropAction{}}}
+	assertRejects(t, cfg, "exactly one of label or annotation")
+}
+
+func TestValidateRejectsForceOnSetAnnotation(t *testing.T) {
+	cfg := validConfig()
+	cfg.Rules[0].Actions[0].Set = &SetAction{Annotation: "runbook_url", Value: "x", Force: true}
+	assertRejects(t, cfg, "not applicable to annotations")
+}
+
+func TestValidateRejectsForceOnDropAnnotation(t *testing.T) {
+	cfg := validConfig()
+	cfg.Rules[0].Actions = []ActionConfig{{Drop: &DropAction{Annotation: "description", Force: true}}}
+	assertRejects(t, cfg, "not applicable to annotations")
+}
+
+func TestValidateAcceptsSetAnnotationNamedAlertnameWithoutForce(t *testing.T) {
+	// ReservedLabels/force exist only to guard the alert's fingerprint;
+	// annotations never affect it, so the name "alertname" is unremarkable
+	// as an annotation.
+	cfg := validConfig()
+	cfg.Rules[0].Actions[0].Set = &SetAction{Annotation: "alertname", Value: "x"}
+	if err := Validate(cfg); err != nil {
+		t.Fatalf("expected valid config to pass, got: %v", err)
+	}
+}
+
 func TestValidateAcceptsForwardTLSCAOnly(t *testing.T) {
 	cfg := validConfig()
 	cfg.Forward.TLS = &ClientTLSSpec{CAFile: "ca.pem"}
