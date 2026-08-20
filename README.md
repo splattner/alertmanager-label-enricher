@@ -157,6 +157,16 @@ If any source has type `kubernetes`, set `rbac.create=true` and list the
 resources it needs under `rbac.rules`. Plain manifests are also available
 under [deploy/manifests](deploy/manifests) for non-Helm deployments.
 
+`podDisruptionBudget.enabled` and `networkPolicy.enabled` are both off by
+default. Turn on `podDisruptionBudget` once `replicaCount` is above 1 — at
+the default of 1, a PDB requiring an available pod blocks node drains
+outright. `networkPolicy` restricts inbound traffic on the enricher's port
+(alert ingestion and `/metrics` share one listener) to
+`networkPolicy.ingress.from`, which must be set explicitly — left empty it
+denies all ingress. Egress is left unrestricted unless
+`networkPolicy.egress` is set, since a safe default would need to know the
+cluster's API server, DNS, and any HTTP sources in advance.
+
 ## Development
 
 ```sh

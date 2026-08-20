@@ -138,3 +138,14 @@ jobs:
                     echo "expected this render to fail without tls.server.existingSecret set" >&2
                     exit 1
                   fi
+
+            - name: Render chart (PodDisruptionBudget + NetworkPolicy)
+              run: |
+                  helm template ale ./charts/alertmanager-label-enricher \
+                    --set podDisruptionBudget.enabled=true \
+                    --set networkPolicy.enabled=true \
+                    --set-json 'networkPolicy.ingress.from=[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"monitoring"}}}]' \
+                    > /tmp/render-guardrails.yaml
+                  grep -q 'kind: PodDisruptionBudget' /tmp/render-guardrails.yaml
+                  grep -q 'kind: NetworkPolicy' /tmp/render-guardrails.yaml
+                  grep -q 'kubernetes.io/metadata.name: monitoring' /tmp/render-guardrails.yaml

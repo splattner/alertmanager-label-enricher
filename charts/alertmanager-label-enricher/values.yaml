@@ -98,6 +98,35 @@ serviceMonitor:
   interval: 30s
   labels: {}
 
+podDisruptionBudget:
+  # -- Creates a PodDisruptionBudget. Leave disabled at the default
+  # replicaCount of 1: a PDB requiring an available pod on a single-replica
+  # Deployment blocks voluntary node drains/evictions entirely.
+  enabled: false
+  # -- Takes precedence over maxUnavailable if set.
+  minAvailable: ""
+  maxUnavailable: 1
+
+networkPolicy:
+  # -- Creates a NetworkPolicy restricting inbound traffic on the
+  # enricher's port (alert ingestion and /metrics share one listener) to
+  # `ingress.from`. Egress is left unrestricted unless `egress` is set
+  # explicitly, since safely allow-listing the Kubernetes API server, any
+  # HTTP sources, and DNS is deployment-specific.
+  enabled: false
+  ingress:
+    # -- NetworkPolicyPeer list. Left empty, ingress.enabled=true still
+    # denies all ingress until this is set — required reading before
+    # enabling.
+    from: []
+    # from:
+    #   - namespaceSelector:
+    #       matchLabels:
+    #         kubernetes.io/metadata.name: monitoring
+  egress: []
+  # egress:
+  #   - {}   # allow all egress, equivalent to having no NetworkPolicy
+
 nodeSelector: {}
 tolerations: []
 affinity: {}
