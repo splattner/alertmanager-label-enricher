@@ -47,6 +47,12 @@ func TestValidateRejectsNegativeRetries(t *testing.T) {
 	assertRejects(t, cfg, "retries")
 }
 
+func TestValidateRejectsNegativeMaxConcurrency(t *testing.T) {
+	cfg := validConfig()
+	cfg.Enrichment.MaxConcurrency = -1
+	assertRejects(t, cfg, "maxConcurrency")
+}
+
 func TestValidateRejectsUnknownSourceType(t *testing.T) {
 	cfg := validConfig()
 	cfg.Sources[0].Type = "carrier-pigeon"

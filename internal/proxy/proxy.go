@@ -16,6 +16,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"golang.org/x/sync/errgroup"
+
 	"github.com/splattner/alertmanager-label-enricher/internal/alert"
 	"github.com/splattner/alertmanager-label-enricher/internal/config"
 	"github.com/splattner/alertmanager-label-enricher/internal/engine"
@@ -130,7 +132,7 @@ func (s *Server) handleAlerts(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(cfg.Enrichment.Timeout))
 	defer cancel()
 
-	if err := s.enrich(ctx, st.Engine, alerts); err != nil {
+	if err := s.enrich(ctx, st.Engine, alerts, cfg.Enrichment.MaxConcurrency); err != nil {
 		var reqFail *engine.RequiredFailure
 		if errors.As(err, &reqFail) {
 			s.log.Warn("required rule failed, batch not forwarded", "error", err.Error())
@@ -157,23 +159,35 @@ func (s *Server) handleAlerts(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(status)
 }
 
-// enrich runs the engine over every alert. A per-alert enrichment error
-// (that is not a RequiredFailure) is logged and swallowed so one bad alert
-// does not block the rest of the batch; a RequiredFailure aborts the whole
-// batch immediately since forwarding without the required label is unsafe.
-func (s *Server) enrich(ctx context.Context, eng *engine.Engine, alerts []alert.Alert) error {
-	for _, a := range alerts {
-		results, err := eng.Apply(ctx, a)
-		recordResults(results)
-		if err != nil {
-			var reqFail *engine.RequiredFailure
-			if errors.As(err, &reqFail) {
-				return err
-			}
-			s.log.Warn("alert enrichment failed", "error", err.Error())
-		}
+// enrich runs the engine over every alert concurrently, bounded by
+// maxConcurrency (each alert's lookups/jq evaluation are independent, and
+// the engine and its compiled queries are safe for concurrent use). A
+// per-alert enrichment error (that is not a RequiredFailure) is logged and
+// swallowed so one bad alert does not block the rest of the batch; a
+// RequiredFailure cancels the remaining in-flight alerts and, once every
+// goroutine has returned, aborts the whole batch — forwarding without the
+// required label is unsafe.
+func (s *Server) enrich(ctx context.Context, eng *engine.Engine, alerts []alert.Alert, maxConcurrency int) error {
+	g, gctx := errgroup.WithContext(ctx)
+	if maxConcurrency > 0 {
+		g.SetLimit(maxConcurrency)
 	}
-	return nil
+
+	for _, a := range alerts {
+		g.Go(func() error {
+			results, err := eng.Apply(gctx, a)
+			recordResults(results)
+			if err != nil {
+				var reqFail *engine.RequiredFailure
+				if errors.As(err, &reqFail) {
+					return err
+				}
+				s.log.Warn("alert enrichment failed", "error", err.Error())
+			}
+			return nil
+		})
+	}
+	return g.Wait()
 }
 
 func recordResults(results []engine.Result) {
@@ -205,13 +219,21 @@ func (s *Server) forward(ctx context.Context, cfg *config.Config, client *http.C
 		err    error
 	}
 
+	// Detached from ctx's cancellation (but not its values): once
+	// minSuccess is reached below, forward returns and the caller's HTTP
+	// handler finishes, which cancels the request context. Stragglers past
+	// minSuccess must keep running — bounded by their own per-attempt
+	// timeout in forwardOne/forwardAttempt — rather than being killed the
+	// instant the response to Prometheus is written.
+	forwardCtx := context.WithoutCancel(ctx)
+
 	results := make(chan result, len(cfg.Targets))
 	var wg sync.WaitGroup
 	for _, t := range cfg.Targets {
 		wg.Add(1)
 		go func(target string) {
 			defer wg.Done()
-			status, err := s.forwardOne(ctx, client, cfg.Forward, target, path, body, hdr)
+			status, err := s.forwardOne(forwardCtx, client, cfg.Forward, target, path, body, hdr)
 			if err != nil {
 				metrics.ForwardErrorsTotal.WithLabelValues(target).Inc()
 			}
