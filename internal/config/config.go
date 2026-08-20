@@ -156,11 +156,26 @@ type SetAction struct {
 	From      *FromConfig `json:"from,omitempty"`
 	Default   string      `json:"default,omitempty"`
 	Overwrite bool        `json:"overwrite,omitempty"`
+	// Force must be set to touch a reserved label (see ReservedLabels);
+	// required in addition to Overwrite, since overwriting alertname is a
+	// distinct, more consequential choice than overwriting an ordinary
+	// label and deserves its own explicit opt-in.
+	Force bool `json:"force,omitempty"`
 }
 
 // DropAction removes a label.
 type DropAction struct {
 	Label string `json:"label"`
+	// Force must be set to drop a reserved label (see ReservedLabels).
+	Force bool `json:"force,omitempty"`
+}
+
+// ReservedLabels are label names Alertmanager treats as special (currently
+// just alertname, which every alert is expected to carry). Dropping or
+// overwriting one changes how an alert is identified and displayed, so
+// doing so requires the action's Force field to be set.
+var ReservedLabels = map[string]bool{
+	"alertname": true,
 }
 
 // ActionConfig is exactly one of Set or Drop.
