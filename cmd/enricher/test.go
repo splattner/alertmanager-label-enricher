@@ -3,12 +3,13 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"flag"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"time"
 
+	"github.com/spf13/cobra"
 	"k8s.io/client-go/dynamic"
 
 	"github.com/splattner/alertmanager-label-enricher/internal/alert"
@@ -22,18 +23,24 @@ import (
 // alert through the engine.
 const startupTimeout = 30 * time.Second
 
-func runTest(args []string) error {
-	fs := flag.NewFlagSet("test", flag.ExitOnError)
-	configPath := fs.String("config", "/etc/enricher/config.yaml", "path to the config file")
-	alertPath := fs.String("alert", "", "path to a JSON file containing one alert object or an array of alerts")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if *alertPath == "" {
-		return fmt.Errorf("-alert is required")
-	}
+func newTestCmd() *cobra.Command {
+	var configPath, alertPath string
 
-	cfg, err := config.Load(*configPath)
+	cmd := &cobra.Command{
+		Use:   "test",
+		Short: "Run one alert through the rule engine and print the label diff",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runTest(cmd, configPath, alertPath)
+		},
+	}
+	cmd.Flags().StringVar(&configPath, "config", "/etc/enricher/config.yaml", "path to the config file")
+	cmd.Flags().StringVar(&alertPath, "alert", "", "path to a JSON file containing one alert object or an array of alerts")
+	_ = cmd.MarkFlagRequired("alert")
+	return cmd
+}
+
+func runTest(cmd *cobra.Command, configPath, alertPath string) error {
+	cfg, err := config.Load(configPath)
 	if err != nil {
 		return err
 	}
@@ -64,11 +71,12 @@ func runTest(args []string) error {
 		return err
 	}
 
-	alerts, err := readAlerts(*alertPath)
+	alerts, err := readAlerts(alertPath)
 	if err != nil {
 		return err
 	}
 
+	out := cmd.OutOrStdout()
 	for i, a := range alerts {
 		before, err := a.Labels()
 		if err != nil {
@@ -82,13 +90,13 @@ func runTest(args []string) error {
 		results, applyErr := eng.Apply(ctx, a)
 		after, _ := a.Labels()
 
-		fmt.Printf("=== alert %d ===\n", i)
-		printDiff(beforeCopy, after)
+		_, _ = fmt.Fprintf(out, "=== alert %d ===\n", i)
+		printDiff(out, beforeCopy, after)
 		for _, r := range results {
-			printResult(r)
+			printResult(out, r)
 		}
 		if applyErr != nil {
-			fmt.Printf("  ERROR: %v\n", applyErr)
+			_, _ = fmt.Fprintf(out, "  ERROR: %v\n", applyErr)
 		}
 	}
 
@@ -111,7 +119,7 @@ func readAlerts(path string) ([]alert.Alert, error) {
 	return []alert.Alert{single}, nil
 }
 
-func printDiff(before, after map[string]string) {
+func printDiff(out io.Writer, before, after map[string]string) {
 	keys := make(map[string]bool, len(before)+len(after))
 	for k := range before {
 		keys[k] = true
@@ -130,26 +138,26 @@ func printDiff(before, after map[string]string) {
 		a, hasA := after[k]
 		switch {
 		case !hasB && hasA:
-			fmt.Printf("  + %s=%s\n", k, a)
+			_, _ = fmt.Fprintf(out, "  + %s=%s\n", k, a)
 		case hasB && !hasA:
-			fmt.Printf("  - %s=%s\n", k, b)
+			_, _ = fmt.Fprintf(out, "  - %s=%s\n", k, b)
 		case b != a:
-			fmt.Printf("  ~ %s=%s -> %s\n", k, b, a)
+			_, _ = fmt.Fprintf(out, "  ~ %s=%s -> %s\n", k, b, a)
 		default:
-			fmt.Printf("    %s=%s\n", k, b)
+			_, _ = fmt.Fprintf(out, "    %s=%s\n", k, b)
 		}
 	}
 }
 
-func printResult(r engine.Result) {
+func printResult(out io.Writer, r engine.Result) {
 	if r.Skipped {
-		fmt.Printf("  rule %s: skipped (no match)\n", r.Rule)
+		_, _ = fmt.Fprintf(out, "  rule %s: skipped (no match)\n", r.Rule)
 		return
 	}
 	dryRun := ""
 	if r.DryRun {
 		dryRun = " (dry-run, not applied)"
 	}
-	fmt.Printf("  rule %s: matched%s added=%v overwritten=%v dropped=%v\n",
+	_, _ = fmt.Fprintf(out, "  rule %s: matched%s added=%v overwritten=%v dropped=%v\n",
 		r.Rule, dryRun, r.Added, r.Overwritten, r.Dropped)
 }
