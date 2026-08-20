@@ -65,6 +65,15 @@ one changes the alert's fingerprint in Alertmanager — which can invalidate
 existing silences — so both require `overwrite: true` (on `set`) or an
 explicit `drop` action.
 
+**Reserved labels.** `alertname` is Alertmanager's primary identifying
+label; overwriting or dropping it is rarely intentional. Config validation
+rejects a `set` action with `overwrite: true` or a `drop` action targeting
+`alertname` unless it also sets `force: true`:
+
+```yaml
+- drop: { label: alertname, force: true }
+```
+
 A rule with `required: true` fails the whole batch closed (503, so
 Prometheus retries) if its lookup fails and no `default` is set. Every
 other rule fails open: forward the alert as-is rather than block delivery.

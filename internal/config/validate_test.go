@@ -122,6 +122,45 @@ func TestValidateRejectsServerTLSMissingCert(t *testing.T) {
 	assertRejects(t, cfg, "server.tls")
 }
 
+func TestValidateRejectsDropOfReservedLabelWithoutForce(t *testing.T) {
+	cfg := validConfig()
+	cfg.Rules[0].Actions = []ActionConfig{{Drop: &DropAction{Label: "alertname"}}}
+	assertRejects(t, cfg, "reserved")
+}
+
+func TestValidateAcceptsDropOfReservedLabelWithForce(t *testing.T) {
+	cfg := validConfig()
+	cfg.Rules[0].Actions = []ActionConfig{{Drop: &DropAction{Label: "alertname", Force: true}}}
+	if err := Validate(cfg); err != nil {
+		t.Fatalf("expected valid config to pass, got: %v", err)
+	}
+}
+
+func TestValidateRejectsOverwriteOfReservedLabelWithoutForce(t *testing.T) {
+	cfg := validConfig()
+	cfg.Rules[0].Actions[0].Set.Label = "alertname"
+	cfg.Rules[0].Actions[0].Set.Overwrite = true
+	assertRejects(t, cfg, "reserved")
+}
+
+func TestValidateAcceptsOverwriteOfReservedLabelWithForce(t *testing.T) {
+	cfg := validConfig()
+	cfg.Rules[0].Actions[0].Set.Label = "alertname"
+	cfg.Rules[0].Actions[0].Set.Overwrite = true
+	cfg.Rules[0].Actions[0].Set.Force = true
+	if err := Validate(cfg); err != nil {
+		t.Fatalf("expected valid config to pass, got: %v", err)
+	}
+}
+
+func TestValidateAcceptsAddingReservedLabelWithoutForce(t *testing.T) {
+	cfg := validConfig()
+	cfg.Rules[0].Actions[0].Set.Label = "alertname"
+	if err := Validate(cfg); err != nil {
+		t.Fatalf("expected valid config to pass, got: %v", err)
+	}
+}
+
 func TestValidateAcceptsForwardTLSCAOnly(t *testing.T) {
 	cfg := validConfig()
 	cfg.Forward.TLS = &ClientTLSSpec{CAFile: "ca.pem"}

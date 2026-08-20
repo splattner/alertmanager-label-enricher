@@ -130,6 +130,9 @@ func validateAction(a ActionConfig, sourceNames map[string]bool) error {
 		if a.Drop.Label == "" {
 			return fmt.Errorf("drop.label is required")
 		}
+		if ReservedLabels[a.Drop.Label] && !a.Drop.Force {
+			return fmt.Errorf("drop.label %q is reserved; set force: true to acknowledge dropping it", a.Drop.Label)
+		}
 		return nil
 	default:
 		return fmt.Errorf("exactly one of set or drop must be set")
@@ -171,6 +174,9 @@ func validateSet(s *SetAction, sourceNames map[string]bool) error {
 	}
 	if strings.TrimSpace(s.Label) != s.Label {
 		return fmt.Errorf("set.label %q: must not have leading/trailing whitespace", s.Label)
+	}
+	if ReservedLabels[s.Label] && s.Overwrite && !s.Force {
+		return fmt.Errorf("set.label %q is reserved; set force: true to acknowledge overwriting it", s.Label)
 	}
 	return nil
 }
