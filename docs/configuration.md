@@ -373,7 +373,12 @@ to make the fingerprint-changing blast radius from [`overwrite`](#actions)
 and `drop` observable. `ale_source_lookups_total{result="hit"}` staying
 high while your Kubernetes API server's request rate stays flat across
 Prometheus's resend cycle is the metric that proves the
-[Kubernetes source](#kubernetes-source)'s caching is doing its job.
+[Kubernetes source](#kubernetes-source)'s caching is doing its job in
+production — the same claim is exercised in CI by
+`internal/proxy/resend_test.go`, which fires an identical alert batch
+through the real handler five times (simulating five resend cycles) and
+asserts the Kubernetes fake client sees zero API calls and the HTTP
+backend sees exactly one request after the informer's initial sync.
 
 ## Reloading
 
