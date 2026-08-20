@@ -4,8 +4,8 @@ description: >-
   Inline proxy that enriches Prometheus alert labels from Kubernetes, HTTP, and
   file lookups before forwarding to Alertmanager
 type: application
-version: 0.3.0
-appVersion: 0.3.0
+version: 0.4.0
+appVersion: 0.4.0
 home: https://github.com/splattner/alertmanager-label-enricher
 sources:
   - https://github.com/splattner/alertmanager-label-enricher
