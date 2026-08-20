@@ -97,6 +97,55 @@ func TestForwardsEnrichedBatchPreservingUnknownFields(t *testing.T) {
 	}
 }
 
+func TestForwardsEnrichedBatchWithAnnotation(t *testing.T) {
+	var received []byte
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer target.Close()
+
+	cfg := &config.Config{
+		Server:     config.ServerConfig{MaxBodyBytes: 1 << 20},
+		Targets:    []config.TargetConfig{{URL: target.URL}},
+		Forward:    config.ForwardConfig{MinSuccess: 1, Timeout: config.Duration(time.Second)},
+		Enrichment: config.EnrichmentConfig{Timeout: config.Duration(time.Second)},
+		Rules: []config.RuleConfig{{
+			Name:    "runbook",
+			Actions: []config.ActionConfig{{Set: &config.SetAction{Annotation: "runbook_url", Value: "https://wiki/runbook"}}},
+		}},
+	}
+	srv := newTestServer(t, cfg)
+
+	body := `[{"labels":{"alertname":"Test"},"annotations":{"summary":"x"},"generatorURL":"http://prom/g"}]`
+	req := httptest.NewRequest(http.MethodPost, "/api/v2/alerts", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	var got []map[string]any
+	if err := json.Unmarshal(received, &got); err != nil {
+		t.Fatalf("target received invalid JSON: %v (%s)", err, received)
+	}
+	if got[0]["generatorURL"] != "http://prom/g" {
+		t.Errorf("generatorURL not preserved: %v", got[0])
+	}
+	annotations := got[0]["annotations"].(map[string]any)
+	if annotations["runbook_url"] != "https://wiki/runbook" {
+		t.Errorf("runbook_url annotation not applied: %v", annotations)
+	}
+	if annotations["summary"] != "x" {
+		t.Errorf("pre-existing summary annotation not preserved: %v", annotations)
+	}
+	labels := got[0]["labels"].(map[string]any)
+	if _, exists := labels["runbook_url"]; exists {
+		t.Errorf("annotation must not also appear as a label: %v", labels)
+	}
+}
+
 func TestForwardSucceedsWithOneOfTwoTargetsUp(t *testing.T) {
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)

@@ -28,7 +28,7 @@ func newTestCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "test",
-		Short: "Run one alert through the rule engine and print the label diff",
+		Short: "Run one alert through the rule engine and print the label/annotation diff",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runTest(cmd, configPath, alertPath)
 		},
@@ -78,20 +78,26 @@ func runTest(cmd *cobra.Command, configPath, alertPath string) error {
 
 	out := cmd.OutOrStdout()
 	for i, a := range alerts {
-		before, err := a.Labels()
+		beforeLabels, err := a.Labels()
 		if err != nil {
 			return fmt.Errorf("alert %d: %w", i, err)
 		}
-		beforeCopy := make(map[string]string, len(before))
-		for k, v := range before {
-			beforeCopy[k] = v
+		beforeAnnotations, err := a.Annotations()
+		if err != nil {
+			return fmt.Errorf("alert %d: %w", i, err)
 		}
+		beforeLabelsCopy := copyMap(beforeLabels)
+		beforeAnnotationsCopy := copyMap(beforeAnnotations)
 
 		results, applyErr := eng.Apply(ctx, a)
-		after, _ := a.Labels()
+		afterLabels, _ := a.Labels()
+		afterAnnotations, _ := a.Annotations()
 
 		_, _ = fmt.Fprintf(out, "=== alert %d ===\n", i)
-		printDiff(out, beforeCopy, after)
+		_, _ = fmt.Fprintln(out, "labels:")
+		printDiff(out, beforeLabelsCopy, afterLabels)
+		_, _ = fmt.Fprintln(out, "annotations:")
+		printDiff(out, beforeAnnotationsCopy, afterAnnotations)
 		for _, r := range results {
 			printResult(out, r)
 		}
@@ -117,6 +123,14 @@ func readAlerts(path string) ([]alert.Alert, error) {
 		return nil, fmt.Errorf("parse %s as an alert object or array: %w", path, err)
 	}
 	return []alert.Alert{single}, nil
+}
+
+func copyMap(m map[string]string) map[string]string {
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
 }
 
 func printDiff(out io.Writer, before, after map[string]string) {
@@ -158,6 +172,6 @@ func printResult(out io.Writer, r engine.Result) {
 	if r.DryRun {
 		dryRun = " (dry-run, not applied)"
 	}
-	_, _ = fmt.Fprintf(out, "  rule %s: matched%s added=%v overwritten=%v dropped=%v\n",
-		r.Rule, dryRun, r.Added, r.Overwritten, r.Dropped)
+	_, _ = fmt.Fprintf(out, "  rule %s: matched%s added=%v overwritten=%v dropped=%v annotationsAdded=%v annotationsOverwritten=%v annotationsDropped=%v\n",
+		r.Rule, dryRun, r.Added, r.Overwritten, r.Dropped, r.AnnotationsAdded, r.AnnotationsOverwritten, r.AnnotationsDropped)
 }

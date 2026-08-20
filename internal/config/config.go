@@ -148,25 +148,33 @@ type FromConfig struct {
 	Regex  string `json:"regex,omitempty"`
 }
 
-// SetAction sets a label to a literal value, a template, or a source lookup.
+// SetAction sets a label or annotation to a literal value, a template, or a
+// source lookup. Exactly one of Label/Annotation is required. Annotations
+// carry no fingerprint risk (unlike labels), so Force never applies to
+// them - only to a reserved Label.
 type SetAction struct {
-	Label     string      `json:"label"`
-	Value     string      `json:"value,omitempty"`
-	Template  string      `json:"template,omitempty"`
-	From      *FromConfig `json:"from,omitempty"`
-	Default   string      `json:"default,omitempty"`
-	Overwrite bool        `json:"overwrite,omitempty"`
+	Label      string      `json:"label,omitempty"`
+	Annotation string      `json:"annotation,omitempty"`
+	Value      string      `json:"value,omitempty"`
+	Template   string      `json:"template,omitempty"`
+	From       *FromConfig `json:"from,omitempty"`
+	Default    string      `json:"default,omitempty"`
+	Overwrite  bool        `json:"overwrite,omitempty"`
 	// Force must be set to touch a reserved label (see ReservedLabels);
 	// required in addition to Overwrite, since overwriting alertname is a
 	// distinct, more consequential choice than overwriting an ordinary
-	// label and deserves its own explicit opt-in.
+	// label and deserves its own explicit opt-in. Not applicable to
+	// annotations.
 	Force bool `json:"force,omitempty"`
 }
 
-// DropAction removes a label.
+// DropAction removes a label or annotation. Exactly one of Label/Annotation
+// is required.
 type DropAction struct {
-	Label string `json:"label"`
-	// Force must be set to drop a reserved label (see ReservedLabels).
+	Label      string `json:"label,omitempty"`
+	Annotation string `json:"annotation,omitempty"`
+	// Force must be set to drop a reserved label (see ReservedLabels). Not
+	// applicable to annotations.
 	Force bool `json:"force,omitempty"`
 }
 

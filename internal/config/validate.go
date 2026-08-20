@@ -130,22 +130,47 @@ func validateAction(a ActionConfig, sourceNames map[string]bool) error {
 	case a.Set != nil:
 		return validateSet(a.Set, sourceNames)
 	case a.Drop != nil:
-		if a.Drop.Label == "" {
-			return fmt.Errorf("drop.label is required")
-		}
-		if ReservedLabels[a.Drop.Label] && !a.Drop.Force {
-			return fmt.Errorf("drop.label %q is reserved; set force: true to acknowledge dropping it", a.Drop.Label)
-		}
-		return nil
+		return validateDrop(a.Drop)
 	default:
 		return fmt.Errorf("exactly one of set or drop must be set")
 	}
 }
 
-func validateSet(s *SetAction, sourceNames map[string]bool) error {
-	if s.Label == "" {
-		return fmt.Errorf("set.label is required")
+// validateDrop checks a drop action: exactly one of Label/Annotation is
+// required. Force applies only to a reserved label - annotations carry no
+// fingerprint risk, so a stray force there is rejected as meaningless
+// rather than silently ignored.
+func validateDrop(d *DropAction) error {
+	switch {
+	case d.Label != "" && d.Annotation != "":
+		return fmt.Errorf("drop: exactly one of label or annotation is required")
+	case d.Label != "":
+		if ReservedLabels[d.Label] && !d.Force {
+			return fmt.Errorf("drop.label %q is reserved; set force: true to acknowledge dropping it", d.Label)
+		}
+		return nil
+	case d.Annotation != "":
+		if d.Force {
+			return fmt.Errorf("drop.annotation %q: force is not applicable to annotations (no fingerprint risk)", d.Annotation)
+		}
+		return nil
+	default:
+		return fmt.Errorf("drop: exactly one of label or annotation is required")
 	}
+}
+
+func validateSet(s *SetAction, sourceNames map[string]bool) error {
+	if s.Label != "" && s.Annotation != "" {
+		return fmt.Errorf("set: exactly one of label or annotation is required")
+	}
+	if s.Label == "" && s.Annotation == "" {
+		return fmt.Errorf("set: exactly one of label or annotation is required")
+	}
+	kind, name := "label", s.Label
+	if s.Annotation != "" {
+		kind, name = "annotation", s.Annotation
+	}
+
 	modes := 0
 	if s.Value != "" {
 		modes++
@@ -157,29 +182,36 @@ func validateSet(s *SetAction, sourceNames map[string]bool) error {
 		modes++
 	}
 	if modes != 1 {
-		return fmt.Errorf("set.label %q: exactly one of value, template or from is required", s.Label)
+		return fmt.Errorf("set.%s %q: exactly one of value, template or from is required", kind, name)
 	}
 	if s.From != nil {
 		if !sourceNames[s.From.Source] {
-			return fmt.Errorf("set.label %q: from.source %q is not a declared source", s.Label, s.From.Source)
+			return fmt.Errorf("set.%s %q: from.source %q is not a declared source", kind, name, s.From.Source)
 		}
 		if s.From.Jq == "" {
-			return fmt.Errorf("set.label %q: from.jq is required", s.Label)
+			return fmt.Errorf("set.%s %q: from.jq is required", kind, name)
 		}
 		if _, err := gojq.Parse(s.From.Jq); err != nil {
-			return fmt.Errorf("set.label %q: invalid jq %q: %w", s.Label, s.From.Jq, err)
+			return fmt.Errorf("set.%s %q: invalid jq %q: %w", kind, name, s.From.Jq, err)
 		}
 		if s.From.Regex != "" {
 			if _, err := regexp.Compile(s.From.Regex); err != nil {
-				return fmt.Errorf("set.label %q: invalid regex %q: %w", s.Label, s.From.Regex, err)
+				return fmt.Errorf("set.%s %q: invalid regex %q: %w", kind, name, s.From.Regex, err)
 			}
 		}
 	}
-	if strings.TrimSpace(s.Label) != s.Label {
-		return fmt.Errorf("set.label %q: must not have leading/trailing whitespace", s.Label)
+	if strings.TrimSpace(name) != name {
+		return fmt.Errorf("set.%s %q: must not have leading/trailing whitespace", kind, name)
 	}
-	if ReservedLabels[s.Label] && s.Overwrite && !s.Force {
-		return fmt.Errorf("set.label %q is reserved; set force: true to acknowledge overwriting it", s.Label)
+
+	if kind == "annotation" {
+		if s.Force {
+			return fmt.Errorf("set.annotation %q: force is not applicable to annotations (no fingerprint risk)", name)
+		}
+		return nil
+	}
+	if ReservedLabels[name] && s.Overwrite && !s.Force {
+		return fmt.Errorf("set.label %q is reserved; set force: true to acknowledge overwriting it", name)
 	}
 	return nil
 }

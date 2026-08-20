@@ -38,6 +38,10 @@ func TestDecodeEncodePreservesUnknownFields(t *testing.T) {
 	if gotLabels["team"] != "platform" || gotLabels["alertname"] != "Test" {
 		t.Errorf("labels = %v", gotLabels)
 	}
+	gotAnnotations := got["annotations"].(map[string]any)
+	if gotAnnotations["summary"] != "x" {
+		t.Errorf("annotations = %v", gotAnnotations)
+	}
 }
 
 func TestLabelsCreatesMissingMap(t *testing.T) {
@@ -52,9 +56,41 @@ func TestLabelsCreatesMissingMap(t *testing.T) {
 	}
 }
 
-func TestAnnotationsReturnsNilWhenAbsent(t *testing.T) {
+func TestAnnotationsCreatesMissingMap(t *testing.T) {
 	a := Alert{}
-	if got := a.Annotations(); got != nil {
-		t.Fatalf("Annotations() = %v, want nil", got)
+	annotations, err := a.Annotations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if annotations == nil {
+		t.Fatal("Annotations() returned nil, want an empty non-nil map")
+	}
+	annotations["x"] = "y"
+	if a["annotations"].(map[string]string)["x"] != "y" {
+		t.Fatal("mutation through Annotations() did not alias the alert's storage")
+	}
+}
+
+func TestAnnotationsAliasesExistingMap(t *testing.T) {
+	a := Alert{"annotations": map[string]any{"summary": "x"}}
+	annotations, err := a.Annotations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	annotations["runbook_url"] = "https://wiki/runbook"
+
+	again, err := a.Annotations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again["runbook_url"] != "https://wiki/runbook" {
+		t.Fatal("a second Annotations() call did not observe a mutation made through the first - annotations must alias like labels do, or rule chaining silently breaks")
+	}
+}
+
+func TestAnnotationsRejectsNonStringValue(t *testing.T) {
+	a := Alert{"annotations": map[string]any{"count": 3}}
+	if _, err := a.Annotations(); err == nil {
+		t.Fatal("expected an error for a non-string annotation value")
 	}
 }

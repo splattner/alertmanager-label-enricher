@@ -68,6 +68,13 @@ one changes the alert's fingerprint in Alertmanager — which can invalidate
 existing silences — so both require `overwrite: true` (on `set`) or an
 explicit `drop` action.
 
+`set` and `drop` can target an `annotation` instead of a `label`
+(`set: { annotation: runbook_url, value: ... }`). Annotations carry no
+fingerprint risk — they're free-form context Alertmanager passes through
+to notifications — so overwriting or dropping one needs no extra opt-in.
+If you're enriching with something purely human-facing (a runbook link, an
+owning Slack channel), prefer an annotation over a label.
+
 **Reserved labels.** `alertname` is Alertmanager's primary identifying
 label; overwriting or dropping it is rarely intentional. Config validation
 rejects a `set` action with `overwrite: true` or a `drop` action targeting
