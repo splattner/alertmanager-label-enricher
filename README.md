@@ -52,7 +52,10 @@ rules:
 
 See [testdata/config.yaml](testdata/config.yaml) for a fuller example
 covering all four source types (kubernetes, http, file, and static/
-conditional rules with no source at all).
+conditional rules with no source at all), and
+[docs/configuration.md](docs/configuration.md) for the full reference —
+every field, matcher op, action, failure-semantics table, and the
+templating/jq mini-languages used inside rules.
 
 ### Rule semantics
 
