@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.4.0](https://github.com/splattner/alertmanager-label-enricher/compare/v0.3.0...v0.4.0) (2026-08-20)
+
+
+### Features
+
+* **chart:** add optional PrometheusRule with self-monitoring alerts ([5f7f571](https://github.com/splattner/alertmanager-label-enricher/commit/5f7f5716587c7ac22e7e017c9522a6d4c93fa882))
+* **chart:** add optional PrometheusRule with self-monitoring alerts ([99244a6](https://github.com/splattner/alertmanager-label-enricher/commit/99244a6a2626ac04b77cff823eed5eced8ab19df))
+* support setting/dropping annotations, not just labels ([3b12308](https://github.com/splattner/alertmanager-label-enricher/commit/3b12308cf633a7b4c7a5c6131650534a191fa7ad))
+* support setting/dropping annotations, not just labels ([d5326c7](https://github.com/splattner/alertmanager-label-enricher/commit/d5326c7f2d844efeb6cd4ce68a9a620e7b629509))
+
+
+### Bug Fixes
+
+* wire up source_lookups/config_reload metrics, complete required_failed ([810a68b](https://github.com/splattner/alertmanager-label-enricher/commit/810a68bed9165e5617377ad76a64ccc19a7b90d0))
+* wire up source_lookups/config_reload metrics, complete required_failed ([81ab4a8](https://github.com/splattner/alertmanager-label-enricher/commit/81ab4a8f8b2faa3f1f9cb507836562335ba28e66))
+
+
+### Performance Improvements
+
+* parallelize enrichment and detach forward stragglers from request ctx ([79ebc71](https://github.com/splattner/alertmanager-label-enricher/commit/79ebc716b49e255d12df6e92337be39bea3acdce))
+* parallelize enrichment, detach forward stragglers from request ctx ([f02179f](https://github.com/splattner/alertmanager-label-enricher/commit/f02179fc67fe0c6dde11b2f7cb63b69da49063dc))
+
 ## [0.3.0](https://github.com/splattner/alertmanager-label-enricher/compare/v0.2.0...v0.3.0) (2026-08-20)
 
 
