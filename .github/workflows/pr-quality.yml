@@ -121,3 +121,20 @@ jobs:
                     > /tmp/render-full.yaml
                   grep -q 'kind: ClusterRole' /tmp/render-full.yaml
                   grep -q 'kind: ServiceMonitor' /tmp/render-full.yaml
+
+            - name: Render chart (TLS server + forward)
+              run: |
+                  helm template ale ./charts/alertmanager-label-enricher \
+                    --set tls.server.enabled=true --set tls.server.existingSecret=enricher-tls \
+                    --set tls.forward.enabled=true --set tls.forward.existingSecret=am-ca \
+                    > /tmp/render-tls.yaml
+                  grep -q 'scheme: HTTPS' /tmp/render-tls.yaml
+                  grep -q 'secretName: enricher-tls' /tmp/render-tls.yaml
+                  grep -q 'secretName: am-ca' /tmp/render-tls.yaml
+
+            - name: Render chart (TLS enabled without existingSecret fails)
+              run: |
+                  if helm template ale ./charts/alertmanager-label-enricher --set tls.server.enabled=true; then
+                    echo "expected this render to fail without tls.server.existingSecret set" >&2
+                    exit 1
+                  fi

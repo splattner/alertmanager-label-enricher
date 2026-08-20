@@ -65,6 +65,21 @@ resources: {}
 #   limits:
 #     memory: 128Mi
 
+tls:
+  server:
+    # -- Mounts existingSecret (a kubernetes.io/tls Secret: tls.crt, tls.key,
+    # optionally ca.crt for mTLS) at /etc/enricher/tls, and switches the
+    # liveness/readiness probes to HTTPS. Reference the mounted paths from
+    # `config`'s `server.tls` (e.g. certFile: /etc/enricher/tls/tls.crt).
+    enabled: false
+    existingSecret: ""
+  forward:
+    # -- Mounts existingSecret (a Secret containing ca.crt and, for a
+    # client certificate, tls.crt/tls.key) at /etc/enricher/forward-tls.
+    # Reference the mounted paths from `config`'s `forward.tls`.
+    enabled: false
+    existingSecret: ""
+
 # -- Extra volumes, e.g. a Secret with an HTTP source's bearer token, or a
 # file-source mapping file separate from the main config.
 extraVolumes: []

@@ -86,17 +86,22 @@ targets:
   - url: https://alertmanager:9093
 forward:
   tls:
-    caFile: /etc/enricher/am-ca/ca.crt       # trust a self-signed/internal Alertmanager CA
-    certFile: /etc/enricher/am-tls/tls.crt   # optional: present a client cert (mTLS to Alertmanager)
-    keyFile: /etc/enricher/am-tls/tls.key
+    caFile: /etc/enricher/forward-tls/ca.crt     # trust a self-signed/internal Alertmanager CA
+    certFile: /etc/enricher/forward-tls/tls.crt  # optional: present a client cert (mTLS to Alertmanager)
+    keyFile: /etc/enricher/forward-tls/tls.key
 ```
 
 `server.tls` is fixed at startup — a hot reload rotates the certificate,
 key, or client CA (useful for cert-manager-style renewal) but cannot turn
 TLS on or off without a restart. `forward.tls` is a single shared block, not
 per-target: Alertmanager replicas in one cluster normally share the same
-server certificate setup. In the Helm chart, mount the relevant secrets via
-`extraVolumes`/`extraVolumeMounts` and reference their paths from `config`.
+server certificate setup.
+
+In the Helm chart, set `tls.server.enabled`/`tls.server.existingSecret` and
+`tls.forward.enabled`/`tls.forward.existingSecret` — the paths above
+(`/etc/enricher/tls`, `/etc/enricher/forward-tls`) are exactly where it
+mounts them, and it switches the liveness/readiness probes to HTTPS
+automatically when `tls.server.enabled` is set.
 
 ## Running
 
