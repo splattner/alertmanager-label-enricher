@@ -98,6 +98,13 @@ func (s *Source) reload() error {
 	if err := yaml.Unmarshal(raw, &v); err != nil {
 		return fmt.Errorf("parse %s: %w", s.path, err)
 	}
+	if v == nil {
+		// An empty or all-null document unmarshals successfully to nil
+		// rather than erroring; treated as a load failure so a torn read
+		// (a non-atomic write caught mid-truncate) can never silently
+		// replace good cached data with nothing.
+		return fmt.Errorf("parse %s: empty or null document", s.path)
+	}
 	s.data.Store(&v)
 	return nil
 }
