@@ -178,6 +178,14 @@ denies all ingress. Egress is left unrestricted unless
 `networkPolicy.egress` is set, since a safe default would need to know the
 cluster's API server, DNS, and any HTTP sources in advance.
 
+Set `serviceMonitor.enabled=true` (Prometheus Operator) to scrape
+`/metrics`, and `prometheusRule.enabled=true` for a starter set of alerts
+on the enricher itself — down, forward failures, a required rule failing,
+config reload failures, high source-lookup error rate. See
+[docs/configuration.md](docs/configuration.md#metrics) for what each
+underlying metric means. `prometheusRule.labels` is commonly needed to
+match your Prometheus Operator's `ruleSelector`.
+
 ## Development
 
 ```sh
