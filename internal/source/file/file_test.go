@@ -39,6 +39,20 @@ func TestNewFailsOnMissingFile(t *testing.T) {
 	}
 }
 
+func TestNewRejectsEmptyDocument(t *testing.T) {
+	// An empty (or all-null) YAML document unmarshals successfully to nil
+	// rather than erroring; it must still be rejected, otherwise a torn
+	// read caught mid-write could silently replace good cached data with
+	// nothing without ever surfacing an error.
+	path := filepath.Join(t.TempDir(), "teams.yaml")
+	if err := os.WriteFile(path, []byte(""), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := New("teams", path, nil); err == nil {
+		t.Fatal("expected New to reject an empty document")
+	}
+}
+
 func TestReloadOnWrite(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "teams.yaml")
@@ -56,7 +70,14 @@ func TestReloadOnWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := os.WriteFile(path, []byte("v: 2\n"), 0o600); err != nil {
+	// Write-then-rename, not a truncating in-place write: matches how a
+	// ConfigMap volume actually updates (an atomic symlink swap) and
+	// avoids a reload racing a torn read of a half-written file.
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte("v: 2\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
 		t.Fatal(err)
 	}
 
@@ -66,7 +87,7 @@ func TestReloadOnWrite(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if v.(map[string]any)["v"] == float64(2) {
+		if m, ok := v.(map[string]any); ok && m["v"] == float64(2) {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
