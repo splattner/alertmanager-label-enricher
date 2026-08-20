@@ -127,7 +127,7 @@ func (s *Server) handleAlerts(w http.ResponseWriter, r *http.Request) {
 	}
 	metrics.AlertsReceivedTotal.Add(float64(len(alerts)))
 
-	ctx, cancel := context.WithTimeout(r.Context(), cfg.Enrichment.Timeout)
+	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(cfg.Enrichment.Timeout))
 	defer cancel()
 
 	if err := s.enrich(ctx, st.Engine, alerts); err != nil {
@@ -211,7 +211,7 @@ func (s *Server) forward(ctx context.Context, cfg *config.Config, client *http.C
 		wg.Add(1)
 		go func(target string) {
 			defer wg.Done()
-			status, err := s.forwardOne(ctx, client, cfg.Forward.Timeout, target, path, body, hdr)
+			status, err := s.forwardOne(ctx, client, cfg.Forward, target, path, body, hdr)
 			if err != nil {
 				metrics.ForwardErrorsTotal.WithLabelValues(target).Inc()
 			}
@@ -243,7 +243,37 @@ func (s *Server) forward(ctx context.Context, cfg *config.Config, client *http.C
 	return 0, fmt.Errorf("forward: only %d/%d targets required succeeded: %w", successes, cfg.Forward.MinSuccess, lastErr)
 }
 
-func (s *Server) forwardOne(ctx context.Context, client *http.Client, timeout time.Duration, target, path string, body []byte, hdr http.Header) (int, error) {
+// retryBackoff is the fixed delay between forward attempts. Kept short and
+// unconfigurable on purpose: Alertmanager's own default notify timeout is
+// 10s, so retries need to fit inside that budget rather than back off
+// aggressively.
+const retryBackoff = 200 * time.Millisecond
+
+// forwardOne sends body to target, retrying up to cfg.Retries additional
+// times (so cfg.Retries=0, the default, is a single attempt) on any
+// failure — a non-2xx response or a transport-level error. It stops early
+// if ctx is done between attempts.
+func (s *Server) forwardOne(ctx context.Context, client *http.Client, cfg config.ForwardConfig, target, path string, body []byte, hdr http.Header) (int, error) {
+	var status int
+	var err error
+	for attempt := 0; attempt <= cfg.Retries; attempt++ {
+		if attempt > 0 {
+			metrics.ForwardRetriesTotal.WithLabelValues(target).Inc()
+			select {
+			case <-ctx.Done():
+				return status, err
+			case <-time.After(retryBackoff):
+			}
+		}
+		status, err = s.forwardAttempt(ctx, client, time.Duration(cfg.Timeout), target, path, body, hdr)
+		if err == nil {
+			return status, nil
+		}
+	}
+	return status, err
+}
+
+func (s *Server) forwardAttempt(ctx context.Context, client *http.Client, timeout time.Duration, target, path string, body []byte, hdr http.Header) (int, error) {
 	start := time.Now()
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()

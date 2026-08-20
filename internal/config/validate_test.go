@@ -41,6 +41,12 @@ func TestValidateRejectsMinSuccessAboveTargetCount(t *testing.T) {
 	assertRejects(t, cfg, "minSuccess")
 }
 
+func TestValidateRejectsNegativeRetries(t *testing.T) {
+	cfg := validConfig()
+	cfg.Forward.Retries = -1
+	assertRejects(t, cfg, "retries")
+}
+
 func TestValidateRejectsUnknownSourceType(t *testing.T) {
 	cfg := validConfig()
 	cfg.Sources[0].Type = "carrier-pigeon"

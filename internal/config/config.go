@@ -48,10 +48,14 @@ type TargetConfig struct {
 
 // ForwardConfig controls how a batch is fanned out to Targets.
 type ForwardConfig struct {
-	MinSuccess int            `json:"minSuccess"`
-	Timeout    time.Duration  `json:"timeout"`
-	Retries    int            `json:"retries"`
-	TLS        *ClientTLSSpec `json:"tls,omitempty"`
+	MinSuccess int      `json:"minSuccess"`
+	Timeout    Duration `json:"timeout"`
+	// Retries is the number of additional attempts made against a target
+	// after an initial failure (0, the default, means a single attempt).
+	// Each retry gets its own Timeout and is separated by a short fixed
+	// backoff.
+	Retries int            `json:"retries"`
+	TLS     *ClientTLSSpec `json:"tls,omitempty"`
 }
 
 // ClientTLSSpec configures TLS trust/identity for outbound connections to
@@ -72,8 +76,8 @@ type ClientTLSSpec struct {
 
 // EnrichmentConfig bounds how long rule evaluation may take per batch.
 type EnrichmentConfig struct {
-	Timeout        time.Duration `json:"timeout"`
-	MaxConcurrency int           `json:"maxConcurrency"`
+	Timeout        Duration `json:"timeout"`
+	MaxConcurrency int      `json:"maxConcurrency"`
 }
 
 // SourceConfig declares one named lookup source.
@@ -96,9 +100,9 @@ type KubernetesSourceSpec struct {
 
 // HTTPCacheSpec configures response caching for an HTTP source.
 type HTTPCacheSpec struct {
-	TTL         time.Duration `json:"ttl"`
-	NegativeTTL time.Duration `json:"negativeTTL"`
-	MaxEntries  int           `json:"maxEntries"`
+	TTL         Duration `json:"ttl"`
+	NegativeTTL Duration `json:"negativeTTL"`
+	MaxEntries  int      `json:"maxEntries"`
 }
 
 // HTTPSourceSpec configures a source backed by an HTTP endpoint.
@@ -107,7 +111,7 @@ type HTTPSourceSpec struct {
 	URL              string            `json:"url"` // templated
 	Headers          map[string]string `json:"headers,omitempty"`
 	AllowedHosts     []string          `json:"allowedHosts"`
-	Timeout          time.Duration     `json:"timeout"`
+	Timeout          Duration          `json:"timeout"`
 	MaxResponseBytes int64             `json:"maxResponseBytes"`
 	Cache            HTTPCacheSpec     `json:"cache"`
 }
@@ -227,10 +231,10 @@ func applyDefaults(cfg *Config) {
 		cfg.Forward.MinSuccess = 1
 	}
 	if cfg.Forward.Timeout == 0 {
-		cfg.Forward.Timeout = 5 * time.Second
+		cfg.Forward.Timeout = Duration(5 * time.Second)
 	}
 	if cfg.Enrichment.Timeout == 0 {
-		cfg.Enrichment.Timeout = 3 * time.Second
+		cfg.Enrichment.Timeout = Duration(3 * time.Second)
 	}
 	if cfg.Enrichment.MaxConcurrency == 0 {
 		cfg.Enrichment.MaxConcurrency = 32
@@ -242,16 +246,16 @@ func applyDefaults(cfg *Config) {
 				s.HTTP.Method = "GET"
 			}
 			if s.HTTP.Timeout == 0 {
-				s.HTTP.Timeout = 2 * time.Second
+				s.HTTP.Timeout = Duration(2 * time.Second)
 			}
 			if s.HTTP.MaxResponseBytes == 0 {
 				s.HTTP.MaxResponseBytes = 1 << 20
 			}
 			if s.HTTP.Cache.TTL == 0 {
-				s.HTTP.Cache.TTL = 10 * time.Minute
+				s.HTTP.Cache.TTL = Duration(10 * time.Minute)
 			}
 			if s.HTTP.Cache.NegativeTTL == 0 {
-				s.HTTP.Cache.NegativeTTL = 30 * time.Second
+				s.HTTP.Cache.NegativeTTL = Duration(30 * time.Second)
 			}
 			if s.HTTP.Cache.MaxEntries == 0 {
 				s.HTTP.Cache.MaxEntries = 10000

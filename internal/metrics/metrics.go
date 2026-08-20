@@ -66,7 +66,13 @@ var (
 	ForwardErrorsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace,
 		Name:      "forward_errors_total",
-		Help:      "Errors forwarding a batch to one Alertmanager target.",
+		Help:      "Errors forwarding a batch to one Alertmanager target, after exhausting forward.retries.",
+	}, []string{"target"})
+
+	ForwardRetriesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "forward_retries_total",
+		Help:      "Retry attempts made forwarding a batch to one Alertmanager target.",
 	}, []string{"target"})
 
 	ConfigReloadsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -96,6 +102,7 @@ func Registry() *prometheus.Registry {
 		SourceLookupDuration,
 		ForwardDuration,
 		ForwardErrorsTotal,
+		ForwardRetriesTotal,
 		ConfigReloadsTotal,
 		ConfigReloadSuccessTimestamp,
 	)

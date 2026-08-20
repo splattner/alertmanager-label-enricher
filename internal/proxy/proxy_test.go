@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -58,8 +59,8 @@ func TestForwardsEnrichedBatchPreservingUnknownFields(t *testing.T) {
 	cfg := &config.Config{
 		Server:     config.ServerConfig{MaxBodyBytes: 1 << 20},
 		Targets:    []config.TargetConfig{{URL: target.URL}},
-		Forward:    config.ForwardConfig{MinSuccess: 1, Timeout: time.Second},
-		Enrichment: config.EnrichmentConfig{Timeout: time.Second},
+		Forward:    config.ForwardConfig{MinSuccess: 1, Timeout: config.Duration(time.Second)},
+		Enrichment: config.EnrichmentConfig{Timeout: config.Duration(time.Second)},
 		Rules: []config.RuleConfig{{
 			Name:    "mark",
 			Actions: []config.ActionConfig{{Set: &config.SetAction{Label: "team", Value: "platform"}}},
@@ -101,8 +102,8 @@ func TestForwardSucceedsWithOneOfTwoTargetsUp(t *testing.T) {
 			{URL: "http://127.0.0.1:1"}, // nothing listens on port 1: connection refused
 			{URL: up.URL},
 		},
-		Forward:    config.ForwardConfig{MinSuccess: 1, Timeout: time.Second},
-		Enrichment: config.EnrichmentConfig{Timeout: time.Second},
+		Forward:    config.ForwardConfig{MinSuccess: 1, Timeout: config.Duration(time.Second)},
+		Enrichment: config.EnrichmentConfig{Timeout: config.Duration(time.Second)},
 	}
 	srv := newTestServer(t, cfg)
 
@@ -119,8 +120,8 @@ func TestForwardFailsWhenMinSuccessNotMet(t *testing.T) {
 	cfg := &config.Config{
 		Server:     config.ServerConfig{MaxBodyBytes: 1 << 20},
 		Targets:    []config.TargetConfig{{URL: "http://127.0.0.1:1"}},
-		Forward:    config.ForwardConfig{MinSuccess: 1, Timeout: time.Second},
-		Enrichment: config.EnrichmentConfig{Timeout: time.Second},
+		Forward:    config.ForwardConfig{MinSuccess: 1, Timeout: config.Duration(time.Second)},
+		Enrichment: config.EnrichmentConfig{Timeout: config.Duration(time.Second)},
 	}
 	srv := newTestServer(t, cfg)
 
@@ -144,8 +145,8 @@ func TestRequiredRuleFailureReturns503AndDoesNotForward(t *testing.T) {
 	cfg := &config.Config{
 		Server:     config.ServerConfig{MaxBodyBytes: 1 << 20},
 		Targets:    []config.TargetConfig{{URL: target.URL}},
-		Forward:    config.ForwardConfig{MinSuccess: 1, Timeout: time.Second},
-		Enrichment: config.EnrichmentConfig{Timeout: time.Second},
+		Forward:    config.ForwardConfig{MinSuccess: 1, Timeout: config.Duration(time.Second)},
+		Enrichment: config.EnrichmentConfig{Timeout: config.Duration(time.Second)},
 		Sources:    []config.SourceConfig{{Name: "cmdb", Type: "http", HTTP: &config.HTTPSourceSpec{URL: "http://cmdb", AllowedHosts: []string{"cmdb"}}}},
 		Rules: []config.RuleConfig{{
 			Name:     "required-tier",
@@ -225,8 +226,8 @@ func TestForwardOverTLSWithTrustedCA(t *testing.T) {
 	cfg := &config.Config{
 		Server:     config.ServerConfig{MaxBodyBytes: 1 << 20},
 		Targets:    []config.TargetConfig{{URL: target.URL}},
-		Forward:    config.ForwardConfig{MinSuccess: 1, Timeout: time.Second},
-		Enrichment: config.EnrichmentConfig{Timeout: time.Second},
+		Forward:    config.ForwardConfig{MinSuccess: 1, Timeout: config.Duration(time.Second)},
+		Enrichment: config.EnrichmentConfig{Timeout: config.Duration(time.Second)},
 	}
 	srv := New(discardLogger())
 	srv.SetState(&State{
@@ -259,8 +260,8 @@ func TestForwardOverTLSWithoutTrustedCAFails(t *testing.T) {
 	cfg := &config.Config{
 		Server:     config.ServerConfig{MaxBodyBytes: 1 << 20},
 		Targets:    []config.TargetConfig{{URL: target.URL}},
-		Forward:    config.ForwardConfig{MinSuccess: 1, Timeout: time.Second},
-		Enrichment: config.EnrichmentConfig{Timeout: time.Second},
+		Forward:    config.ForwardConfig{MinSuccess: 1, Timeout: config.Duration(time.Second)},
+		Enrichment: config.EnrichmentConfig{Timeout: config.Duration(time.Second)},
 	}
 	srv := newTestServer(t, cfg)
 
@@ -270,5 +271,93 @@ func TestForwardOverTLSWithoutTrustedCAFails(t *testing.T) {
 
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("status = %d, want 502 (untrusted certificate)", rec.Code)
+	}
+}
+
+func TestForwardRetriesUntilSuccess(t *testing.T) {
+	var attempts int64
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		n := atomic.AddInt64(&attempts, 1)
+		if n < 3 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer target.Close()
+
+	cfg := &config.Config{
+		Server:     config.ServerConfig{MaxBodyBytes: 1 << 20},
+		Targets:    []config.TargetConfig{{URL: target.URL}},
+		Forward:    config.ForwardConfig{MinSuccess: 1, Timeout: config.Duration(time.Second), Retries: 2},
+		Enrichment: config.EnrichmentConfig{Timeout: config.Duration(time.Second)},
+	}
+	srv := newTestServer(t, cfg)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v2/alerts", strings.NewReader(`[{"labels":{"alertname":"Test"}}]`))
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s, want 200 after retries", rec.Code, rec.Body.String())
+	}
+	if got := atomic.LoadInt64(&attempts); got != 3 {
+		t.Fatalf("target received %d attempts, want 3 (1 initial + 2 retries)", got)
+	}
+}
+
+func TestForwardStopsAfterExhaustingRetries(t *testing.T) {
+	var attempts int64
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt64(&attempts, 1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer target.Close()
+
+	cfg := &config.Config{
+		Server:     config.ServerConfig{MaxBodyBytes: 1 << 20},
+		Targets:    []config.TargetConfig{{URL: target.URL}},
+		Forward:    config.ForwardConfig{MinSuccess: 1, Timeout: config.Duration(time.Second), Retries: 2},
+		Enrichment: config.EnrichmentConfig{Timeout: config.Duration(time.Second)},
+	}
+	srv := newTestServer(t, cfg)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v2/alerts", strings.NewReader(`[{"labels":{"alertname":"Test"}}]`))
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502 once retries are exhausted", rec.Code)
+	}
+	if got := atomic.LoadInt64(&attempts); got != 3 {
+		t.Fatalf("target received %d attempts, want exactly 3 (1 initial + 2 retries, no more)", got)
+	}
+}
+
+func TestForwardDefaultIsNoRetries(t *testing.T) {
+	var attempts int64
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt64(&attempts, 1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer target.Close()
+
+	cfg := &config.Config{
+		Server:     config.ServerConfig{MaxBodyBytes: 1 << 20},
+		Targets:    []config.TargetConfig{{URL: target.URL}},
+		Forward:    config.ForwardConfig{MinSuccess: 1, Timeout: config.Duration(time.Second)}, // Retries: 0 (zero value)
+		Enrichment: config.EnrichmentConfig{Timeout: config.Duration(time.Second)},
+	}
+	srv := newTestServer(t, cfg)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v2/alerts", strings.NewReader(`[{"labels":{"alertname":"Test"}}]`))
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", rec.Code)
+	}
+	if got := atomic.LoadInt64(&attempts); got != 1 {
+		t.Fatalf("target received %d attempts, want exactly 1 (retries default to 0)", got)
 	}
 }
