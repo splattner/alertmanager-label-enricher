@@ -23,6 +23,9 @@ func Validate(cfg *Config) error {
 	if cfg.Forward.MinSuccess > len(cfg.Targets) {
 		return fmt.Errorf("forward.minSuccess (%d) exceeds the number of targets (%d)", cfg.Forward.MinSuccess, len(cfg.Targets))
 	}
+	if cfg.Forward.Retries < 0 {
+		return fmt.Errorf("forward.retries (%d) must not be negative", cfg.Forward.Retries)
+	}
 
 	if cfg.Server.TLS != nil {
 		if cfg.Server.TLS.CertFile == "" || cfg.Server.TLS.KeyFile == "" {

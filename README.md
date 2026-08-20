@@ -69,6 +69,25 @@ A rule with `required: true` fails the whole batch closed (503, so
 Prometheus retries) if its lookup fails and no `default` is set. Every
 other rule fails open: forward the alert as-is rather than block delivery.
 
+### Forwarding
+
+```yaml
+targets:
+  - url: http://alertmanager-0:9093
+  - url: http://alertmanager-1:9093
+forward:
+  minSuccess: 1      # default 1: the batch is delivered once this many targets accept it
+  timeout: 5s        # per attempt, per target
+  retries: 2         # additional attempts per target after the first, on any failure
+```
+
+Each target is tried concurrently; `minSuccess` is how many must accept the
+batch before the response to Prometheus succeeds — the rest are left to
+finish in the background. `retries` applies per target, not per batch: a
+target gets up to `retries` extra attempts (separated by a short fixed
+backoff) before it's counted as failed. Retries stop early if the request
+context is done. The default, `retries: 0`, is a single attempt.
+
 ### TLS
 
 Alertmanager itself can serve TLS (via `--web.config.file`), so both sides

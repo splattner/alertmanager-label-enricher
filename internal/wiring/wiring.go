@@ -5,6 +5,7 @@ package wiring
 
 import (
 	"fmt"
+	"time"
 
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
@@ -70,10 +71,10 @@ func BuildSources(cfg *config.Config, kubeClient dynamic.Interface, logf func(fo
 				URL:              s.HTTP.URL,
 				Headers:          s.HTTP.Headers,
 				AllowedHosts:     s.HTTP.AllowedHosts,
-				Timeout:          s.HTTP.Timeout,
+				Timeout:          time.Duration(s.HTTP.Timeout),
 				MaxResponseBytes: s.HTTP.MaxResponseBytes,
-				TTL:              s.HTTP.Cache.TTL,
-				NegativeTTL:      s.HTTP.Cache.NegativeTTL,
+				TTL:              time.Duration(s.HTTP.Cache.TTL),
+				NegativeTTL:      time.Duration(s.HTTP.Cache.NegativeTTL),
 				MaxEntries:       s.HTTP.Cache.MaxEntries,
 			})
 			if err != nil {

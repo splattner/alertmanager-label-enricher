@@ -127,8 +127,8 @@ func startEnricher(t *testing.T, target string) *httptest.Server {
 	cfg := &config.Config{
 		Server:     config.ServerConfig{MaxBodyBytes: 1 << 20},
 		Targets:    []config.TargetConfig{{URL: target}},
-		Forward:    config.ForwardConfig{MinSuccess: 1, Timeout: 5 * time.Second},
-		Enrichment: config.EnrichmentConfig{Timeout: 3 * time.Second},
+		Forward:    config.ForwardConfig{MinSuccess: 1, Timeout: config.Duration(5 * time.Second)},
+		Enrichment: config.EnrichmentConfig{Timeout: config.Duration(3 * time.Second)},
 		Rules: []config.RuleConfig{{
 			Name:    "mark-e2e",
 			Actions: []config.ActionConfig{{Set: &config.SetAction{Label: "environment", Value: "e2e"}}},
