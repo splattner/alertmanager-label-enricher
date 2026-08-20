@@ -1,0 +1,104 @@
+# alertmanager-label-enricher
+
+An inline proxy that sits between Prometheus and Alertmanager and enriches
+alert labels from external lookups — Kubernetes objects, HTTP endpoints, or
+a static file — before forwarding alerts on. Because enrichment happens
+before Alertmanager, the new labels participate fully in routing, grouping,
+inhibition and silences.
+
+```
+Prometheus ──POST /api/v2/alerts──▶ enricher ──┬──▶ alertmanager-0:9093
+                                                ├──▶ alertmanager-1:9093
+                                                └──▶ alertmanager-2:9093
+```
+
+## Why
+
+Prometheus's built-in `alert_relabel_configs` already covers static and
+conditional label rewriting. This project exists for the cases that need an
+external lookup: e.g. adding a `team` label read off the alert's
+`namespace`'s Kubernetes object, or off a CMDB via HTTP.
+
+## Configuration
+
+Point Prometheus's `alerting.alertmanagers` at the enricher instead of
+Alertmanager directly, and give the enricher a `config.yaml`:
+
+```yaml
+server:
+  listen: ":9099"
+
+targets:
+  - url: http://alertmanager:9093
+
+sources:
+  - name: ns
+    type: kubernetes
+    kubernetes:
+      version: v1
+      resource: namespaces
+      name: '{{ .Labels.namespace }}'
+
+rules:
+  - name: team-from-namespace
+    match:
+      - { label: namespace, op: exists }
+    actions:
+      - set:
+          label: team
+          from: { source: ns, jq: '.metadata.labels["team"]' }
+          default: unassigned
+```
+
+See [testdata/config.yaml](testdata/config.yaml) for a fuller example
+covering all four source types (kubernetes, http, file, and static/
+conditional rules with no source at all).
+
+### Rule semantics
+
+Rules run in declared order and **all matching rules apply** — a rule is
+not skipped because an earlier one already set a label. Later rules see the
+labels earlier rules added. Matchers within one rule are ANDed.
+
+Adding a new label is always allowed. Overwriting or dropping an existing
+one changes the alert's fingerprint in Alertmanager — which can invalidate
+existing silences — so both require `overwrite: true` (on `set`) or an
+explicit `drop` action.
+
+A rule with `required: true` fails the whole batch closed (503, so
+Prometheus retries) if its lookup fails and no `default` is set. Every
+other rule fails open: forward the alert as-is rather than block delivery.
+
+## Running
+
+```sh
+go run ./cmd/enricher serve --config config.yaml
+go run ./cmd/enricher check --config config.yaml           # validate and exit
+go run ./cmd/enricher test  --config config.yaml --alert testdata/alert.json  # before/after label diff
+```
+
+`POST /-/reload`, `SIGHUP`, or an edit to the config file all trigger a hot
+reload. `/healthz` and `/readyz` are standard Kubernetes probes; `/readyz`
+returns 503 until every source (chiefly Kubernetes informers) has completed
+its initial sync. Metrics are served at `/metrics`.
+
+## Deploying
+
+A Helm chart is in [charts/alertmanager-label-enricher](charts/alertmanager-label-enricher):
+
+```sh
+helm install ale ./charts/alertmanager-label-enricher \
+  --set-file config=config.yaml
+```
+
+If any source has type `kubernetes`, set `rbac.create=true` and list the
+resources it needs under `rbac.rules`. Plain manifests are also available
+under [deploy/manifests](deploy/manifests) for non-Helm deployments.
+
+## Development
+
+```sh
+go build ./...
+go test -race ./...
+go test -tags e2e -run TestE2E ./...   # requires a container runtime (docker or podman)
+```

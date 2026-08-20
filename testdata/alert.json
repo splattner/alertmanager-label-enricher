@@ -1,0 +1,12 @@
+{
+  "labels": {
+    "alertname": "HighMemoryUsage",
+    "namespace": "payments",
+    "cluster": "prod-eu1",
+    "severity": "critical"
+  },
+  "annotations": {
+    "summary": "Memory usage above threshold"
+  },
+  "startsAt": "2026-08-20T10:00:00Z"
+}

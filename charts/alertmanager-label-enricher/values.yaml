@@ -1,0 +1,88 @@
+# -- Number of enricher replicas. The service fans an alert batch out to
+# every Alertmanager target and only needs one instance to succeed
+# (forward.minSuccess in config), so replicas here are for enricher
+# availability, not Alertmanager HA.
+replicaCount: 1
+
+image:
+  repository: ghcr.io/splattner/alertmanager-label-enricher
+  # -- Defaults to the chart's appVersion.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+service:
+  type: ClusterIP
+  port: 9099
+
+# -- The enricher's config.yaml, mounted from a ConfigMap. See the project
+# README for the full schema (targets, sources, rules).
+config: |
+  server:
+    listen: ":9099"
+  targets:
+    - url: http://alertmanager:9093
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+rbac:
+  # -- Creates a ClusterRole/ClusterRoleBinding granting get/list/watch on
+  # the resources named in `rules`. Required only when config.yaml declares
+  # a source of type `kubernetes`; the chart cannot infer the GVRs from
+  # `config` (a raw string), so they must be listed here too.
+  create: false
+  rules: []
+  # rules:
+  #   - apiGroups: [""]
+  #     resources: ["namespaces"]
+  #     verbs: ["get", "list", "watch"]
+
+podAnnotations: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+resources: {}
+# resources:
+#   requests:
+#     cpu: 50m
+#     memory: 64Mi
+#   limits:
+#     memory: 128Mi
+
+# -- Extra volumes, e.g. a Secret with an HTTP source's bearer token, or a
+# file-source mapping file separate from the main config.
+extraVolumes: []
+extraVolumeMounts: []
+
+extraEnv: []
+# extraEnv:
+#   - name: CMDB_TOKEN
+#     valueFrom:
+#       secretKeyRef:
+#         name: cmdb-token
+#         key: token
+
+serviceMonitor:
+  enabled: false
+  interval: 30s
+  labels: {}
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

@@ -1,0 +1,42 @@
+server:
+  listen: ":9099"
+
+targets:
+  - url: http://alertmanager:9093
+
+sources:
+  - name: ns
+    type: kubernetes
+    kubernetes:
+      version: v1
+      resource: namespaces
+      name: '{{ .Labels.namespace }}'
+
+  - name: teams
+    type: file
+    file:
+      path: /etc/enricher/teams.yaml
+
+rules:
+  - name: team-from-namespace
+    match:
+      - { label: namespace, op: exists }
+      - { label: team, op: absent }
+    actions:
+      - set:
+          label: team
+          from: { source: ns, jq: '.metadata.labels["team"]' }
+
+  - name: team-from-map-fallback
+    match:
+      - { label: team, op: absent }
+    actions:
+      - set:
+          label: team
+          from: { source: teams, jq: '.namespaces[$labels.namespace].team' }
+          default: unassigned
+
+  - name: mark-prod
+    match: [ { label: cluster, op: regex, value: 'prod-.*' } ]
+    actions:
+      - set: { label: environment, value: production }

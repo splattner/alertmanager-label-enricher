@@ -1,0 +1,49 @@
+name: E2E
+
+# Runs the enricher against a real Alertmanager container. Kept out of
+# PR Quality because it pulls an image and takes longer, while the rest of
+# the suite is seconds and needs no container runtime.
+on:
+    pull_request:
+        branches: [main]
+    push:
+        branches: [main]
+    schedule:
+        # Alertmanager images are pinned, but this also exercises our reading
+        # of its real API; a nightly run surfaces breakage before a release.
+        - cron: "0 3 * * *"
+    workflow_dispatch:
+
+permissions:
+    contents: read
+
+jobs:
+    e2e:
+        name: alertmanager ${{ matrix.alertmanager }}
+        runs-on: ubuntu-latest
+        timeout-minutes: 15
+        strategy:
+            # One version failing is the interesting result; the others still
+            # need to report so we learn whether it is version-specific.
+            fail-fast: false
+            matrix:
+                include:
+                    - alertmanager: v0.34.0
+                    - alertmanager: v0.32.2
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v7
+
+            - name: Setup Go
+              uses: actions/setup-go@v7
+              with:
+                  go-version-file: go.mod
+                  cache: true
+
+            - name: Run e2e suite
+              # CI is set by Actions; the harness turns "cannot start the
+              # container runtime" from a skip into a failure when it sees
+              # it, so a broken environment cannot pass as a silent no-op.
+              env:
+                  E2E_ALERTMANAGER_IMAGE: quay.io/prometheus/alertmanager:${{ matrix.alertmanager }}
+              run: go test -tags e2e -count=1 -run TestE2E -v ./...

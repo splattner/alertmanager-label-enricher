@@ -1,0 +1,58 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":dependencyDashboard",
+    ":semanticCommits",
+    ":automergeMinor"
+  ],
+  "labels": [
+    "dependencies"
+  ],
+  "timezone": "Europe/Zurich",
+  "customManagers": [
+    {
+      "description": "The Alertmanager image the e2e harness's default target compiles and runs against. Scoped to e2e_test.go only so it cannot rewrite the older matrix entries in .github/workflows/e2e.yml, which intentionally cover older Alertmanager releases too.",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^e2e/e2e_test\\.go$/"
+      ],
+      "matchStrings": [
+        "quay\\.io/prometheus/alertmanager:(?<currentValue>v[0-9][^\"\\s]*)"
+      ],
+      "depNameTemplate": "quay.io/prometheus/alertmanager",
+      "datasourceTemplate": "docker"
+    }
+  ],
+  "packageRules": [
+    {
+      "matchManagers": [
+        "github-actions"
+      ],
+      "groupName": "github-actions"
+    },
+    {
+      "matchManagers": [
+        "dockerfile"
+      ],
+      "groupName": "docker base images"
+    },
+    {
+      "description": "k8s.io/* move in lockstep; splitting them produces unbuildable combinations.",
+      "matchPackageNames": [
+        "k8s.io/**",
+        "sigs.k8s.io/**"
+      ],
+      "groupName": "kubernetes"
+    },
+    {
+      "matchUpdateTypes": [
+        "major"
+      ],
+      "labels": [
+        "dependencies",
+        "major"
+      ]
+    }
+  ]
+}

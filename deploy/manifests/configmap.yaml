@@ -1,0 +1,28 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alertmanager-label-enricher
+  labels:
+    app.kubernetes.io/name: alertmanager-label-enricher
+data:
+  config.yaml: |
+    server:
+      listen: ":9099"
+    targets:
+      - url: http://alertmanager:9093
+    sources:
+      - name: ns
+        type: kubernetes
+        kubernetes:
+          version: v1
+          resource: namespaces
+          name: '{{ .Labels.namespace }}'
+    rules:
+      - name: team-from-namespace
+        match:
+          - { label: namespace, op: exists }
+        actions:
+          - set:
+              label: team
+              from: { source: ns, jq: '.metadata.labels["team"]' }
+              default: unassigned

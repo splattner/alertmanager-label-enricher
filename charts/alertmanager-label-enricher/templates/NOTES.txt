@@ -1,0 +1,13 @@
+alertmanager-label-enricher is deployed.
+
+Point Prometheus's `alerting.alertmanagers` at this Service instead of
+Alertmanager directly:
+
+  {{ include "alertmanager-label-enricher.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.port }}
+
+Edit `config.yaml` (the `config` value) to declare your sources and rules,
+then `helm upgrade` — the Deployment restarts automatically on config
+changes via a checksum annotation.
+
+If any source has type `kubernetes`, set `rbac.create=true` and list the
+GVRs it needs under `rbac.rules`.

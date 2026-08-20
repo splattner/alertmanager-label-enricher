@@ -1,0 +1,192 @@
+package proxy
+
+import (
+	"encoding/json"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/splattner/alertmanager-label-enricher/internal/config"
+	"github.com/splattner/alertmanager-label-enricher/internal/engine"
+	"github.com/splattner/alertmanager-label-enricher/internal/extract"
+	"github.com/splattner/alertmanager-label-enricher/internal/source"
+)
+
+func discardLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+type emptyRegistry struct{}
+
+func (emptyRegistry) Get(string) (source.Source, bool) { return nil, false }
+
+func mustEngine(t *testing.T, cfg *config.Config) *engine.Engine {
+	t.Helper()
+	if err := config.Validate(cfg); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	eng, err := engine.Compile(cfg, emptyRegistry{}, extract.NewCache())
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	return eng
+}
+
+func newTestServer(t *testing.T, cfg *config.Config) *Server {
+	t.Helper()
+	srv := New(discardLogger())
+	srv.SetState(&State{Cfg: cfg, Engine: mustEngine(t, cfg), Synced: func() bool { return true }})
+	return srv
+}
+
+func TestForwardsEnrichedBatchPreservingUnknownFields(t *testing.T) {
+	var received []byte
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer target.Close()
+
+	cfg := &config.Config{
+		Server:     config.ServerConfig{MaxBodyBytes: 1 << 20},
+		Targets:    []config.TargetConfig{{URL: target.URL}},
+		Forward:    config.ForwardConfig{MinSuccess: 1, Timeout: time.Second},
+		Enrichment: config.EnrichmentConfig{Timeout: time.Second},
+		Rules: []config.RuleConfig{{
+			Name:    "mark",
+			Actions: []config.ActionConfig{{Set: &config.SetAction{Label: "team", Value: "platform"}}},
+		}},
+	}
+	srv := newTestServer(t, cfg)
+
+	body := `[{"labels":{"alertname":"Test"},"generatorURL":"http://prom/g"}]`
+	req := httptest.NewRequest(http.MethodPost, "/api/v2/alerts", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	var got []map[string]any
+	if err := json.Unmarshal(received, &got); err != nil {
+		t.Fatalf("target received invalid JSON: %v (%s)", err, received)
+	}
+	if got[0]["generatorURL"] != "http://prom/g" {
+		t.Errorf("generatorURL not preserved: %v", got[0])
+	}
+	labels := got[0]["labels"].(map[string]any)
+	if labels["team"] != "platform" {
+		t.Errorf("team label not applied: %v", labels)
+	}
+}
+
+func TestForwardSucceedsWithOneOfTwoTargetsUp(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer up.Close()
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{MaxBodyBytes: 1 << 20},
+		Targets: []config.TargetConfig{
+			{URL: "http://127.0.0.1:1"}, // nothing listens on port 1: connection refused
+			{URL: up.URL},
+		},
+		Forward:    config.ForwardConfig{MinSuccess: 1, Timeout: time.Second},
+		Enrichment: config.EnrichmentConfig{Timeout: time.Second},
+	}
+	srv := newTestServer(t, cfg)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v2/alerts", strings.NewReader(`[{"labels":{"alertname":"Test"}}]`))
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s, want 200 (minSuccess=1 met by the up target)", rec.Code, rec.Body.String())
+	}
+}
+
+func TestForwardFailsWhenMinSuccessNotMet(t *testing.T) {
+	cfg := &config.Config{
+		Server:     config.ServerConfig{MaxBodyBytes: 1 << 20},
+		Targets:    []config.TargetConfig{{URL: "http://127.0.0.1:1"}},
+		Forward:    config.ForwardConfig{MinSuccess: 1, Timeout: time.Second},
+		Enrichment: config.EnrichmentConfig{Timeout: time.Second},
+	}
+	srv := newTestServer(t, cfg)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v2/alerts", strings.NewReader(`[{"labels":{"alertname":"Test"}}]`))
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", rec.Code)
+	}
+}
+
+func TestRequiredRuleFailureReturns503AndDoesNotForward(t *testing.T) {
+	called := false
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer target.Close()
+
+	cfg := &config.Config{
+		Server:     config.ServerConfig{MaxBodyBytes: 1 << 20},
+		Targets:    []config.TargetConfig{{URL: target.URL}},
+		Forward:    config.ForwardConfig{MinSuccess: 1, Timeout: time.Second},
+		Enrichment: config.EnrichmentConfig{Timeout: time.Second},
+		Sources:    []config.SourceConfig{{Name: "cmdb", Type: "http", HTTP: &config.HTTPSourceSpec{URL: "http://cmdb", AllowedHosts: []string{"cmdb"}}}},
+		Rules: []config.RuleConfig{{
+			Name:     "required-tier",
+			Required: true,
+			Actions: []config.ActionConfig{{Set: &config.SetAction{
+				Label: "tier",
+				From:  &config.FromConfig{Source: "cmdb", Jq: ".tier"},
+			}}},
+		}},
+	}
+	// emptyRegistry.Get always returns not-found, which the engine treats
+	// as "source not registered" — an error, triggering the required path.
+	srv := newTestServer(t, cfg)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v2/alerts", strings.NewReader(`[{"labels":{"alertname":"Test"}}]`))
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, body = %s, want 503", rec.Code, rec.Body.String())
+	}
+	if called {
+		t.Fatal("target must not be called when a required rule fails")
+	}
+}
+
+func TestReadyzReflectsSyncState(t *testing.T) {
+	cfg := &config.Config{Server: config.ServerConfig{MaxBodyBytes: 1 << 20}, Targets: []config.TargetConfig{{URL: "http://x"}}}
+	srv := New(discardLogger())
+	srv.SetState(&State{Cfg: cfg, Engine: mustEngine(t, cfg), Synced: func() bool { return false }})
+
+	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("readyz status = %d, want 503 while not synced", rec.Code)
+	}
+}
+
+func TestHealthzAlwaysOK(t *testing.T) {
+	srv := New(discardLogger())
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("healthz status = %d, want 200", rec.Code)
+	}
+}
