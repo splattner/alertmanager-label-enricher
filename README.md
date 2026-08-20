@@ -164,12 +164,19 @@ its initial sync. Metrics are served at `/metrics`.
 
 ## Deploying
 
-A Helm chart is in [charts/alertmanager-label-enricher](charts/alertmanager-label-enricher):
+The Helm chart ([charts/alertmanager-label-enricher](charts/alertmanager-label-enricher)) is published via chart-releaser to a Helm repo hosted on GitHub Pages:
 
 ```sh
-helm install ale ./charts/alertmanager-label-enricher \
+helm repo add alertmanager-label-enricher https://splattner.github.io/alertmanager-label-enricher
+helm repo update
+helm install ale alertmanager-label-enricher/alertmanager-label-enricher \
   --set-file config=config.yaml
 ```
+
+Use `helm search repo alertmanager-label-enricher --versions` to see available
+versions, or pass `--version` to pin one. For chart development, `helm
+install`/`helm template` against the local `./charts/alertmanager-label-enricher`
+path instead.
 
 If any source has type `kubernetes`, set `rbac.create=true` and list the
 resources it needs under `rbac.rules`. Plain manifests are also available
