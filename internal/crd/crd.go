@@ -62,6 +62,9 @@ type Config struct {
 	// decides which of these a namespace may *use*, but a rule naming a
 	// source that does not exist at all is simply malformed.
 	DeclaredSources []string
+	// MaxRules caps compiled CR-sourced rules across every namespace.
+	// 0 means unlimited.
+	MaxRules int
 	// Debounce defaults to 1s if zero.
 	Debounce time.Duration
 	// SyncTimeout bounds how long Start waits for the initial list of
@@ -85,6 +88,7 @@ type Watcher struct {
 	client          dynamic.Interface
 	enforcement     config.EnforcementConfig
 	declaredSources map[string]bool
+	maxRules        int
 	debounce        time.Duration
 	syncTimeout     time.Duration
 	onChange        func()
@@ -100,6 +104,13 @@ type Watcher struct {
 
 	metricsMu      sync.Mutex
 	seenNamespaces map[string]bool
+
+	// Status writes run on a single background goroutine, coalescing:
+	// statusPending holds the most recent batch not yet written.
+	statusMu      sync.Mutex
+	statusPending []decision
+	statusRunning bool
+	statusIdle    chan struct{} // signalled when the writer goes idle
 }
 
 // New builds a Watcher but does not start it; call Start to begin
@@ -135,6 +146,7 @@ func New(client dynamic.Interface, cfg Config) *Watcher {
 		client:          client,
 		enforcement:     cfg.Enforcement,
 		declaredSources: declaredSources,
+		maxRules:        cfg.MaxRules,
 		debounce:        debounce,
 		syncTimeout:     syncTimeout,
 		onChange:        onChange,
@@ -232,22 +244,94 @@ func (w *Watcher) Rules() []config.RuleConfig {
 // leader election guards this against other replicas doing the same work
 // concurrently - see reconcileStatus and emitEvent for how that's made
 // safe rather than exclusive.
+//
+// The rules are returned immediately and the status writes happen in the
+// background. They are a courtesy to the CR's author, whereas the returned
+// rules gate the engine swap and, on the first call, the listener starting
+// at all - so an enricher must never wait on the API server to begin
+// forwarding alerts. With a few hundred CRs and a slow API server, doing
+// these inline delayed startup in proportion to how many tenants existed.
 func (w *Watcher) Reconcile(ctx context.Context) []config.RuleConfig {
 	rules, decisions := w.evaluate()
-	for _, d := range decisions {
-		status := metav1.ConditionFalse
-		if d.accepted {
-			status = metav1.ConditionTrue
-		}
-		w.reconcileStatus(ctx, d.obj, metav1.Condition{
-			Type:               readyCondition,
-			Status:             status,
-			Reason:             d.reason,
-			Message:            d.message,
-			ObservedGeneration: d.obj.GetGeneration(),
-		})
-	}
+	w.queueStatusWrites(ctx, decisions)
 	return rules
+}
+
+// queueStatusWrites hands decisions to the background writer, replacing any
+// batch not yet written. A status is a report on the current state, so a
+// newer batch always supersedes an older one - writing a snapshot that is
+// already stale gains nothing and costs API calls. At most one writer runs
+// at a time, which also keeps the request rate bounded no matter how often
+// CRs change.
+func (w *Watcher) queueStatusWrites(ctx context.Context, decisions []decision) {
+	if len(decisions) == 0 {
+		return
+	}
+
+	w.statusMu.Lock()
+	w.statusPending = decisions
+	if w.statusRunning {
+		w.statusMu.Unlock()
+		return
+	}
+	w.statusRunning = true
+	w.statusMu.Unlock()
+
+	go w.writeStatuses(ctx)
+}
+
+func (w *Watcher) writeStatuses(ctx context.Context) {
+	for {
+		w.statusMu.Lock()
+		pending := w.statusPending
+		w.statusPending = nil
+		if pending == nil {
+			w.statusRunning = false
+			if w.statusIdle != nil {
+				close(w.statusIdle)
+				w.statusIdle = nil
+			}
+			w.statusMu.Unlock()
+			return
+		}
+		w.statusMu.Unlock()
+
+		for _, d := range pending {
+			if ctx.Err() != nil {
+				break // shut down; the next reconcile after restart converges
+			}
+			status := metav1.ConditionFalse
+			if d.accepted {
+				status = metav1.ConditionTrue
+			}
+			w.reconcileStatus(ctx, d.obj, metav1.Condition{
+				Type:               readyCondition,
+				Status:             status,
+				Reason:             d.reason,
+				Message:            d.message,
+				ObservedGeneration: d.obj.GetGeneration(),
+			})
+		}
+	}
+}
+
+// awaitStatusWrites blocks until every queued status write has been
+// attempted. Only tests need this: production never waits on status, which
+// is the whole point of writing it in the background.
+func (w *Watcher) awaitStatusWrites() {
+	for {
+		w.statusMu.Lock()
+		if !w.statusRunning && w.statusPending == nil {
+			w.statusMu.Unlock()
+			return
+		}
+		if w.statusIdle == nil {
+			w.statusIdle = make(chan struct{})
+		}
+		idle := w.statusIdle
+		w.statusMu.Unlock()
+		<-idle
+	}
 }
 
 func (w *Watcher) evaluate() ([]config.RuleConfig, []decision) {
@@ -327,6 +411,20 @@ func (w *Watcher) evaluate() ([]config.RuleConfig, []decision) {
 		if limit := w.maxRulesFor(nsLabels); limit > 0 && acceptedByNS[c.ns] >= limit {
 			msg := fmt.Sprintf("namespace already has the maximum %d rule(s)", limit)
 			w.recordRejected(c.ns, "max_rules_exceeded")
+			w.logf("crd: reject EnrichmentRule %s/%s: %s", c.ns, c.name, msg)
+			rejectedByNS[c.ns]++
+			decisions = append(decisions, decision{obj: c.obj, accepted: false, reason: "MaxRulesExceeded", message: msg})
+			continue
+		}
+
+		// The per-namespace cap bounds any one tenant; this bounds their
+		// sum, which is what sets per-alert evaluation cost and the size of
+		// the metric registry - rule names come from tenant-chosen CR names
+		// and their series are never reclaimed. Ordering is deterministic,
+		// so which rules make the cut is stable rather than a race.
+		if w.maxRules > 0 && len(out) >= w.maxRules {
+			msg := fmt.Sprintf("the cluster-wide limit of %d compiled EnrichmentRule(s) is already reached (crd.maxRules)", w.maxRules)
+			w.recordRejected(c.ns, "global_max_rules_exceeded")
 			w.logf("crd: reject EnrichmentRule %s/%s: %s", c.ns, c.name, msg)
 			rejectedByNS[c.ns]++
 			decisions = append(decisions, decision{obj: c.obj, accepted: false, reason: "MaxRulesExceeded", message: msg})

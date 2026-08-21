@@ -32,6 +32,9 @@ func Validate(cfg *Config) error {
 	if cfg.Enrichment.MaxConcurrency < 0 {
 		return fmt.Errorf("enrichment.maxConcurrency (%d) must not be negative", cfg.Enrichment.MaxConcurrency)
 	}
+	if cfg.CRD.MaxRules < 0 {
+		return fmt.Errorf("crd.maxRules (%d) must not be negative", cfg.CRD.MaxRules)
+	}
 
 	if cfg.Server.TLS != nil {
 		if cfg.Server.TLS.CertFile == "" || cfg.Server.TLS.KeyFile == "" {
