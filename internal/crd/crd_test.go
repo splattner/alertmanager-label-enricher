@@ -54,6 +54,7 @@ func newFakeClient(t *testing.T, objs ...runtime.Object) *dynamicfake.FakeDynami
 	return dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme, map[schema.GroupVersionResource]string{
 		GVR:          "EnrichmentRuleList",
 		namespaceGVR: "NamespaceList",
+		eventGVR:     "EventList",
 	}, objs...)
 }
 

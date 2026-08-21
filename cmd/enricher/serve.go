@@ -140,7 +140,7 @@ func (s *server) buildGeneration(ctx context.Context) error {
 				s.log.Info(fmt.Sprintf(format, args...))
 			},
 			OnChange: func() {
-				if err := s.compileAndSwap(); err != nil {
+				if err := s.compileAndSwap(genCtx); err != nil {
 					s.log.Error("recompile after EnrichmentRule change failed", "error", err.Error())
 					return
 				}
@@ -171,7 +171,7 @@ func (s *server) buildGeneration(ctx context.Context) error {
 // file-config rules plus (if the CRD watch is enabled) whatever
 // EnrichmentRule CRs internal/crd currently accepts, and atomically swaps
 // it into the running server.
-func (s *server) compileAndSwap() error {
+func (s *server) compileAndSwap(ctx context.Context) error {
 	gen := s.currentGen.Load()
 	if gen == nil {
 		return fmt.Errorf("no configuration generation built yet")
@@ -179,7 +179,7 @@ func (s *server) compileAndSwap() error {
 
 	engineCfg := *gen.cfg
 	if gen.watcher != nil {
-		engineCfg.Rules = append(append([]config.RuleConfig{}, gen.cfg.Rules...), gen.watcher.Rules()...)
+		engineCfg.Rules = append(append([]config.RuleConfig{}, gen.cfg.Rules...), gen.watcher.Reconcile(ctx)...)
 	}
 	eng, err := wiring.BuildEngine(&engineCfg, gen.sources)
 	if err != nil {
@@ -206,7 +206,7 @@ func (s *server) applyConfig(ctx context.Context) error {
 	if err := s.buildGeneration(ctx); err != nil {
 		return err
 	}
-	return s.compileAndSwap()
+	return s.compileAndSwap(ctx)
 }
 
 func runServe(configPath string) error {

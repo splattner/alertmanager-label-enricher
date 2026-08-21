@@ -33,6 +33,7 @@ import (
 // the engine automatically when a CR changes after that.
 
 var namespaceGVR = schema.GroupVersionResource{Version: "v1", Resource: "namespaces"}
+var eventGVR = schema.GroupVersionResource{Version: "v1", Resource: "events"}
 
 func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -71,6 +72,7 @@ func newFakeDynamicClient(objs ...runtime.Object) *dynamicfake.FakeDynamicClient
 	return dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme, map[schema.GroupVersionResource]string{
 		crd.GVR:      "EnrichmentRuleList",
 		namespaceGVR: "NamespaceList",
+		eventGVR:     "EventList",
 	}, objs...)
 }
 
@@ -149,6 +151,19 @@ func TestApplyConfigStartsCRDWatchAndCompilesRules(t *testing.T) {
 	annotations, _ := got[0]["annotations"].(map[string]any)
 	if annotations["note"] != "hello" {
 		t.Fatalf("expected the CR-sourced rule to set annotations.note=hello, got %v", got[0])
+	}
+
+	cr, err := client.Resource(crd.GVR).Namespace("default").Get(ctx, "add-note", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get EnrichmentRule: %v", err)
+	}
+	conditions, found, err := unstructured.NestedSlice(cr.Object, "status", "conditions")
+	if err != nil || !found || len(conditions) != 1 {
+		t.Fatalf("status.conditions = %+v (found=%v, err=%v), want exactly one condition", conditions, found, err)
+	}
+	cond, _ := conditions[0].(map[string]any)
+	if cond["type"] != "Ready" || cond["status"] != "True" || cond["reason"] != "Compiled" {
+		t.Fatalf("status.conditions[0] = %+v, want Ready/True/Compiled", cond)
 	}
 }
 
