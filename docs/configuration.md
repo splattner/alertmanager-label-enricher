@@ -445,7 +445,7 @@ tenant's.
 | `ale_config_reloads_total` | `result` (`ok`\|`error`) | a config reload attempt, from any trigger (initial load, `SIGHUP`, file watch, `POST /-/reload`) |
 | `ale_config_reload_success_timestamp_seconds` | — | unix time of the last successful reload |
 | `ale_crd_rules` | `namespace`, `state` (`accepted`\|`rejected`) | `EnrichmentRule` CRs currently known, by namespace |
-| `ale_crd_rules_rejected_total` | `namespace`, `reason` (`decode_error`\|`namespace_unreadable`\|`policy_violation`\|`max_rules_exceeded`) | a CR rejected, cumulative |
+| `ale_crd_rules_rejected_total` | `namespace`, `reason` (`decode_error`\|`namespace_unreadable`\|`policy_violation`\|`max_rules_exceeded`\|`global_max_rules_exceeded`) | a CR rejected, cumulative |
 | `ale_crd_status_updates_total` | `result` (`ok`\|`conflict`\|`error`) | a `status.conditions` write attempt on an `EnrichmentRule` CR. No leader election guards these across replicas, so a nonzero `conflict` rate is expected and benign - see [Rejected rules](#rejected-rules) |
 
 `ale_labels_overwritten_total`/`ale_labels_dropped_total` exist specifically
@@ -527,6 +527,7 @@ and untouched by it.
 ```yaml
 crd:
   enabled: true
+  maxRules: 1000          # cluster-wide cap on compiled CR rules (0 = unlimited)
 enforcement:
   namespaceMatcherLabel: namespace   # inject `<label> == <CR's own namespace>` on every CR-sourced rule
   rules:                              # first-match-wins on the CR's namespace's own labels
@@ -548,7 +549,8 @@ enforcement:
 | Routing escalation — set `severity=critical` or `team=platform` to page someone else's on-call | `labels.deny` (or `labels.allow`) |
 | Exfiltration — `from: { source: <shared>, jq: '.data.token' }` copies whatever the enricher's ServiceAccount/credentials can read into a label or annotation, landing in a notification | `allowedSources`, default **none** |
 | Availability — `required: true` on a rule that always fails 503s the **whole batch**, not just the tenant's own alerts | `allowRequired`, default **false** |
-| Rule flooding | `maxRulesPerNamespace` |
+| Rule flooding by one namespace | `maxRulesPerNamespace` |
+| Rule flooding in aggregate — per-alert evaluation cost and metric-series growth, since rule names come from tenant-chosen CR names and series are never reclaimed | `crd.maxRules`, default **1000** |
 | A tenant's `from.jq` burns CPU without end, starving enrichment of its concurrency slots | jq evaluation is bounded by `enrichment.timeout` |
 | A tenant's malformed rule fails the compile, taking every other tenant's rules down with it | CR-sourced rules are fully validated before compilation, in single-tenant mode too; a rule that cannot compile is rejected individually |
 
@@ -639,6 +641,14 @@ Events:
   ----     ------            ----  ----                        -------
   Warning  PolicyViolation   3m    alertmanager-label-enricher  rule "runbook": actions[0]: set label "severity": denied by policy
 ```
+
+Status is written in the background, not on the path that compiles rules.
+Those writes are a courtesy to the CR's author, while the compiled rules
+gate the engine swap and — on the first reconcile — the listener opening at
+all, so the enricher never waits on the API server before it can start
+forwarding alerts. A condition therefore appears shortly after a change
+rather than instantly, and repeated changes coalesce into one write of the
+latest state.
 
 `status.conditions[type=Ready]` and the `Ready`/`Reason` columns above
 come from `kubectl`'s CRD printer columns, driven off the same condition;

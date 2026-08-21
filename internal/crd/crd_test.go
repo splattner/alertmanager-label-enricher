@@ -3,6 +3,7 @@ package crd
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -281,5 +282,53 @@ func TestStartReportsCancellationDistinctly(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("Start did not return after its context was cancelled")
+	}
+}
+
+// ALE-14. maxRulesPerNamespace bounds any single tenant, but nothing
+// bounded their sum - and rule names come from tenant-chosen CR names,
+// whose metric series are never reclaimed. crd.maxRules caps the total.
+func TestWatcherEnforcesGlobalMaxRules(t *testing.T) {
+	objs := []runtime.Object{
+		namespaceObj("team-a", nil),
+		namespaceObj("team-b", nil),
+	}
+	for i := 0; i < 5; i++ {
+		objs = append(objs, enrichmentRule("team-a", fmt.Sprintf("a-%d", i), setLabelSpec("team", "a")))
+		objs = append(objs, enrichmentRule("team-b", fmt.Sprintf("b-%d", i), setLabelSpec("team", "b")))
+	}
+	client := newFakeClient(t, objs...)
+
+	w := New(client, Config{Enforcement: catchAllEnforcement(), MaxRules: 3})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	t.Cleanup(cancel)
+	if err := w.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	rules := w.Rules()
+	if len(rules) != 3 {
+		t.Fatalf("Rules() returned %d rules, want 3 (crd.maxRules)", len(rules))
+	}
+
+	// Deterministic ordering means the same three win every time, rather
+	// than which tenant's CRs happen to be listed first.
+	again := w.Rules()
+	for i := range rules {
+		if rules[i].Name != again[i].Name {
+			t.Fatalf("rule selection is not stable across calls: %v vs %v", rules, again)
+		}
+	}
+}
+
+func TestWatcherGlobalMaxRulesZeroMeansUnlimited(t *testing.T) {
+	objs := []runtime.Object{namespaceObj("ns", nil)}
+	for i := 0; i < 12; i++ {
+		objs = append(objs, enrichmentRule("ns", fmt.Sprintf("r-%02d", i), setLabelSpec("team", "x")))
+	}
+	w := startedWatcher(t, newFakeClient(t, objs...), catchAllEnforcement()) // MaxRules unset
+
+	if got := len(w.Rules()); got != 12 {
+		t.Fatalf("Rules() returned %d, want all 12 - MaxRules 0 must mean unlimited", got)
 	}
 }

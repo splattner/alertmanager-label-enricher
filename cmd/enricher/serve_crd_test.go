@@ -156,17 +156,36 @@ func TestApplyConfigStartsCRDWatchAndCompilesRules(t *testing.T) {
 		t.Fatalf("expected the CR-sourced rule to set annotations.note=hello, got %v", got[0])
 	}
 
-	cr, err := client.Resource(crd.GVR).Namespace("default").Get(ctx, "add-note", metav1.GetOptions{})
-	if err != nil {
-		t.Fatalf("get EnrichmentRule: %v", err)
-	}
-	conditions, found, err := unstructured.NestedSlice(cr.Object, "status", "conditions")
-	if err != nil || !found || len(conditions) != 1 {
-		t.Fatalf("status.conditions = %+v (found=%v, err=%v), want exactly one condition", conditions, found, err)
-	}
-	cond, _ := conditions[0].(map[string]any)
+	cond := awaitReadyCondition(ctx, t, client, "default", "add-note")
 	if cond["type"] != "Ready" || cond["status"] != "True" || cond["reason"] != "Compiled" {
 		t.Fatalf("status.conditions[0] = %+v, want Ready/True/Compiled", cond)
+	}
+}
+
+// awaitReadyCondition polls for the CR's Ready condition. Status writes are
+// deliberately asynchronous - the engine swap must never wait on the API
+// server - so a test that reads immediately after applyConfig would be
+// racing the background writer.
+func awaitReadyCondition(ctx context.Context, t *testing.T, client dynamic.Interface, ns, name string) map[string]any {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		cr, err := client.Resource(crd.GVR).Namespace(ns).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			t.Fatalf("get EnrichmentRule %s/%s: %v", ns, name, err)
+		}
+		conditions, found, err := unstructured.NestedSlice(cr.Object, "status", "conditions")
+		if err != nil {
+			t.Fatalf("read status.conditions: %v", err)
+		}
+		if found && len(conditions) == 1 {
+			cond, _ := conditions[0].(map[string]any)
+			return cond
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no Ready condition written for %s/%s within 5s (conditions=%+v)", ns, name, conditions)
+		}
+		time.Sleep(25 * time.Millisecond)
 	}
 }
 
@@ -373,15 +392,7 @@ func TestMalformedCRDoesNotBlockStartup(t *testing.T) {
 	}
 
 	// And the poison CR must be reported to its own author, not silently lost.
-	cr, err := client.Resource(crd.GVR).Namespace("attacker").Get(ctx, "poison", metav1.GetOptions{})
-	if err != nil {
-		t.Fatalf("get poison CR: %v", err)
-	}
-	conditions, found, err := unstructured.NestedSlice(cr.Object, "status", "conditions")
-	if err != nil || !found || len(conditions) != 1 {
-		t.Fatalf("status.conditions = %+v (found=%v, err=%v), want one condition explaining the rejection", conditions, found, err)
-	}
-	cond, _ := conditions[0].(map[string]any)
+	cond := awaitReadyCondition(ctx, t, client, "attacker", "poison")
 	if cond["status"] != "False" || cond["reason"] != "PolicyViolation" {
 		t.Errorf("condition = %+v, want the rejection reported as False/PolicyViolation", cond)
 	}

@@ -161,6 +161,7 @@ func (s *server) buildGeneration(ctx context.Context) (*generation, context.Canc
 		gen.watcher = crd.New(kubeClient, crd.Config{
 			Enforcement:     cfg.Enforcement,
 			DeclaredSources: declaredSources,
+			MaxRules:        cfg.CRD.MaxRules,
 			Logf: func(format string, args ...any) {
 				s.log.Info(fmt.Sprintf(format, args...))
 			},

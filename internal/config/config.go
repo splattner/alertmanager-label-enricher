@@ -29,6 +29,13 @@ type Config struct {
 // in this file.
 type CRDConfig struct {
 	Enabled bool `json:"enabled,omitempty"`
+	// MaxRules caps how many CR-sourced rules are compiled in total,
+	// across every namespace. enforcement's maxRulesPerNamespace bounds
+	// any single tenant; this bounds their sum, which is what actually
+	// determines evaluation cost per alert and the size of the metric
+	// registry (rule names come from tenant-chosen CR names, and series
+	// are never reclaimed). 0 means unlimited; defaults to 1000.
+	MaxRules int `json:"maxRules,omitempty"`
 }
 
 // EnforcementConfig constrains what a namespaced EnrichmentRule CR is
@@ -331,6 +338,9 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.Enrichment.MaxConcurrency == 0 {
 		cfg.Enrichment.MaxConcurrency = 32
+	}
+	if cfg.CRD.MaxRules == 0 {
+		cfg.CRD.MaxRules = 1000
 	}
 	for i := range cfg.Sources {
 		s := &cfg.Sources[i]
