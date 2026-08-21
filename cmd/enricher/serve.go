@@ -42,159 +42,181 @@ func newServeCmd() *cobra.Command {
 	return cmd
 }
 
+// generation holds everything that's expensive to rebuild and only changes
+// when the file config itself changes: sources (which starts Kubernetes
+// informers), TLS configs, and the CRD watcher (which starts its own
+// informers). server.compileAndSwap, below, reuses the current
+// generation's sources/watcher and only recompiles the engine - so a
+// CR-only change (the common case once the CRD watch is enabled) never
+// restarts a Kubernetes source informer or flaps /readyz the way
+// rebuilding everything would.
+type generation struct {
+	cfg           *config.Config
+	sources       *fileSource.Registry
+	watcher       *crd.Watcher
+	forwardClient *http.Client
+	serverTLS     *tls.Config
+}
+
+// server holds the mutable state a running `serve` invocation swaps as
+// config reloads happen. It's a struct (rather than the closures-over-
+// locals runServe used to build it from) so tests can drive
+// buildGeneration/compileAndSwap directly against an injected kubeClient
+// factory - e.g. a fake dynamic client - instead of a real cluster.
+type server struct {
+	configPath string
+	log        *slog.Logger
+	proxy      *proxy.Server
+	kubeClient func() (dynamic.Interface, error)
+
+	genCancel  atomic.Pointer[context.CancelFunc]
+	currentGen atomic.Pointer[generation]
+}
+
+func newServer(configPath string, log *slog.Logger) *server {
+	return &server{
+		configPath: configPath,
+		log:        log,
+		proxy:      proxy.New(log),
+		kubeClient: wiring.KubeClient,
+	}
+}
+
+// buildGeneration loads the file config and rebuilds everything that
+// depends on it: sources, TLS configs, and (if enabled) the CRD watcher.
+// It stores the result as the new current generation and cancels the
+// previous one's context, but does not itself compile the engine or
+// publish server state - call compileAndSwap for that.
+func (s *server) buildGeneration(ctx context.Context) error {
+	cfg, err := config.Load(s.configPath)
+	if err != nil {
+		return err
+	}
+
+	var kubeClient dynamic.Interface
+	if wiring.NeedsKubeClient(cfg) {
+		kubeClient, err = s.kubeClient()
+		if err != nil {
+			return fmt.Errorf("build kubernetes client: %w", err)
+		}
+	}
+
+	sources, err := wiring.BuildSources(cfg, kubeClient, func(format string, args ...any) {
+		s.log.Info(fmt.Sprintf(format, args...))
+	})
+	if err != nil {
+		return err
+	}
+
+	var forwardClient *http.Client
+	if cfg.Forward.TLS != nil {
+		t := cfg.Forward.TLS
+		tlsCfg, err := tlsutil.ClientConfig(t.CAFile, t.CertFile, t.KeyFile, t.InsecureSkipVerify)
+		if err != nil {
+			return fmt.Errorf("build forward tls config: %w", err)
+		}
+		forwardClient = &http.Client{Transport: &http.Transport{TLSClientConfig: tlsCfg}}
+	}
+
+	var serverTLS *tls.Config
+	if cfg.Server.TLS != nil {
+		serverTLS, err = tlsutil.ServerConfig(cfg.Server.TLS.CertFile, cfg.Server.TLS.KeyFile, cfg.Server.TLS.ClientCAFile)
+		if err != nil {
+			return fmt.Errorf("build server tls config: %w", err)
+		}
+	}
+
+	genCtx, cancel := context.WithCancel(ctx)
+	if err := sources.Start(genCtx); err != nil {
+		cancel()
+		return err
+	}
+
+	var watcher *crd.Watcher
+	if cfg.CRD.Enabled {
+		watcher = crd.New(kubeClient, crd.Config{
+			Enforcement: cfg.Enforcement,
+			Logf: func(format string, args ...any) {
+				s.log.Info(fmt.Sprintf(format, args...))
+			},
+			OnChange: func() {
+				if err := s.compileAndSwap(); err != nil {
+					s.log.Error("recompile after EnrichmentRule change failed", "error", err.Error())
+					return
+				}
+				s.log.Info("engine recompiled after EnrichmentRule change")
+			},
+		})
+		if err := watcher.Start(genCtx); err != nil {
+			cancel()
+			return fmt.Errorf("start crd watcher: %w", err)
+		}
+	}
+
+	s.currentGen.Store(&generation{
+		cfg:           cfg,
+		sources:       sources,
+		watcher:       watcher,
+		forwardClient: forwardClient,
+		serverTLS:     serverTLS,
+	})
+
+	if prev := s.genCancel.Swap(&cancel); prev != nil {
+		(*prev)()
+	}
+	return nil
+}
+
+// compileAndSwap recompiles the engine from the current generation's
+// file-config rules plus (if the CRD watch is enabled) whatever
+// EnrichmentRule CRs internal/crd currently accepts, and atomically swaps
+// it into the running server.
+func (s *server) compileAndSwap() error {
+	gen := s.currentGen.Load()
+	if gen == nil {
+		return fmt.Errorf("no configuration generation built yet")
+	}
+
+	engineCfg := *gen.cfg
+	if gen.watcher != nil {
+		engineCfg.Rules = append(append([]config.RuleConfig{}, gen.cfg.Rules...), gen.watcher.Rules()...)
+	}
+	eng, err := wiring.BuildEngine(&engineCfg, gen.sources)
+	if err != nil {
+		return err
+	}
+
+	synced := gen.sources.HasSynced
+	if gen.watcher != nil {
+		w := gen.watcher
+		synced = func() bool { return gen.sources.HasSynced() && w.HasSynced() }
+	}
+
+	s.proxy.SetState(&proxy.State{
+		Cfg:           gen.cfg,
+		Engine:        eng,
+		Synced:        synced,
+		ForwardClient: gen.forwardClient,
+		ServerTLS:     gen.serverTLS,
+	})
+	return nil
+}
+
+func (s *server) applyConfig(ctx context.Context) error {
+	if err := s.buildGeneration(ctx); err != nil {
+		return err
+	}
+	return s.compileAndSwap()
+}
+
 func runServe(configPath string) error {
 	log := newLogger()
-	srv := proxy.New(log)
+	s := newServer(configPath, log)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	var genCancel atomic.Pointer[context.CancelFunc]
-
-	// generation holds everything that's expensive to rebuild and only
-	// changes when the file config itself changes: sources (which starts
-	// Kubernetes informers), TLS configs, and the CRD watcher (which
-	// starts its own informers). compileAndSwap, below, reuses the
-	// current generation's sources/watcher and only recompiles the
-	// engine - so a CR-only change (the common case once the CRD watch is
-	// enabled) never restarts a Kubernetes source informer or flaps
-	// /readyz the way rebuilding everything would.
-	type generation struct {
-		cfg           *config.Config
-		sources       *fileSource.Registry
-		watcher       *crd.Watcher
-		forwardClient *http.Client
-		serverTLS     *tls.Config
-	}
-	var currentGen atomic.Pointer[generation]
-
-	// compileAndSwap recompiles the engine from the current generation's
-	// file-config rules plus (if the CRD watch is enabled) whatever
-	// EnrichmentRule CRs internal/crd currently accepts, and atomically
-	// swaps it into the running server. Declared as a var so the CRD
-	// watcher's OnChange callback (built inside buildGeneration, below)
-	// can reference it before it's assigned.
-	var compileAndSwap func() error
-
-	buildGeneration := func() error {
-		cfg, err := config.Load(configPath)
-		if err != nil {
-			return err
-		}
-
-		var kubeClient dynamic.Interface
-		if wiring.NeedsKubeClient(cfg) {
-			kubeClient, err = wiring.KubeClient()
-			if err != nil {
-				return fmt.Errorf("build kubernetes client: %w", err)
-			}
-		}
-
-		sources, err := wiring.BuildSources(cfg, kubeClient, func(format string, args ...any) {
-			log.Info(fmt.Sprintf(format, args...))
-		})
-		if err != nil {
-			return err
-		}
-
-		var forwardClient *http.Client
-		if cfg.Forward.TLS != nil {
-			t := cfg.Forward.TLS
-			tlsCfg, err := tlsutil.ClientConfig(t.CAFile, t.CertFile, t.KeyFile, t.InsecureSkipVerify)
-			if err != nil {
-				return fmt.Errorf("build forward tls config: %w", err)
-			}
-			forwardClient = &http.Client{Transport: &http.Transport{TLSClientConfig: tlsCfg}}
-		}
-
-		var serverTLS *tls.Config
-		if cfg.Server.TLS != nil {
-			serverTLS, err = tlsutil.ServerConfig(cfg.Server.TLS.CertFile, cfg.Server.TLS.KeyFile, cfg.Server.TLS.ClientCAFile)
-			if err != nil {
-				return fmt.Errorf("build server tls config: %w", err)
-			}
-		}
-
-		genCtx, cancel := context.WithCancel(ctx)
-		if err := sources.Start(genCtx); err != nil {
-			cancel()
-			return err
-		}
-
-		var watcher *crd.Watcher
-		if cfg.CRD.Enabled {
-			watcher = crd.New(kubeClient, crd.Config{
-				Enforcement: cfg.Enforcement,
-				Logf: func(format string, args ...any) {
-					log.Info(fmt.Sprintf(format, args...))
-				},
-				OnChange: func() {
-					if err := compileAndSwap(); err != nil {
-						log.Error("recompile after EnrichmentRule change failed", "error", err.Error())
-						return
-					}
-					log.Info("engine recompiled after EnrichmentRule change")
-				},
-			})
-			if err := watcher.Start(genCtx); err != nil {
-				cancel()
-				return fmt.Errorf("start crd watcher: %w", err)
-			}
-		}
-
-		currentGen.Store(&generation{
-			cfg:           cfg,
-			sources:       sources,
-			watcher:       watcher,
-			forwardClient: forwardClient,
-			serverTLS:     serverTLS,
-		})
-
-		if prev := genCancel.Swap(&cancel); prev != nil {
-			(*prev)()
-		}
-		return nil
-	}
-
-	compileAndSwap = func() error {
-		gen := currentGen.Load()
-		if gen == nil {
-			return fmt.Errorf("no configuration generation built yet")
-		}
-
-		engineCfg := *gen.cfg
-		if gen.watcher != nil {
-			engineCfg.Rules = append(append([]config.RuleConfig{}, gen.cfg.Rules...), gen.watcher.Rules()...)
-		}
-		eng, err := wiring.BuildEngine(&engineCfg, gen.sources)
-		if err != nil {
-			return err
-		}
-
-		synced := gen.sources.HasSynced
-		if gen.watcher != nil {
-			w := gen.watcher
-			synced = func() bool { return gen.sources.HasSynced() && w.HasSynced() }
-		}
-
-		srv.SetState(&proxy.State{
-			Cfg:           gen.cfg,
-			Engine:        eng,
-			Synced:        synced,
-			ForwardClient: gen.forwardClient,
-			ServerTLS:     gen.serverTLS,
-		})
-		return nil
-	}
-
-	applyConfig := func() error {
-		if err := buildGeneration(); err != nil {
-			return err
-		}
-		return compileAndSwap()
-	}
-
-	reload := recordReload(applyConfig)
+	reload := recordReload(func() error { return s.applyConfig(ctx) })
 
 	if err := reload(); err != nil {
 		return fmt.Errorf("initial config load: %w", err)
@@ -204,7 +226,7 @@ func runServe(configPath string) error {
 	go watchReload(ctx, configPath, log, reload)
 
 	mux := http.NewServeMux()
-	mux.Handle("/", srv.Handler())
+	mux.Handle("/", s.proxy.Handler())
 	mux.Handle("/metrics", promhttp.HandlerFor(metrics.Registry(), promhttp.HandlerOpts{}))
 	mux.HandleFunc("POST /-/reload", func(w http.ResponseWriter, _ *http.Request) {
 		if err := reload(); err != nil {
@@ -231,7 +253,7 @@ func runServe(configPath string) error {
 		httpSrv.TLSConfig = &tls.Config{
 			MinVersion: tls.VersionTLS12,
 			GetConfigForClient: func(*tls.ClientHelloInfo) (*tls.Config, error) {
-				st := srv.State()
+				st := s.proxy.State()
 				if st == nil || st.ServerTLS == nil {
 					return nil, fmt.Errorf("server tls not configured")
 				}
