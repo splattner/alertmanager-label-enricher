@@ -8,6 +8,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/splattner/alertmanager-label-enricher/internal/extract"
+	"github.com/splattner/alertmanager-label-enricher/internal/tmpl"
 )
 
 // Validate checks a Config for internal consistency: required fields,
@@ -239,6 +240,15 @@ func validateSet(s *SetAction, sourceNames map[string]bool) error {
 	}
 	if s.Template != "" {
 		modes++
+	}
+	if s.Template != "" {
+		// Templates were previously unchecked: an unbalanced {{ passed
+		// `enricher check` and failed per-alert at runtime instead, which
+		// for a required rule means every batch 503s. Compile it here, the
+		// same way engine.Compile will.
+		if _, err := tmpl.Compile(name, s.Template); err != nil {
+			return fmt.Errorf("set.%s %q: %w", kind, name, err)
+		}
 	}
 	if s.From != nil {
 		modes++

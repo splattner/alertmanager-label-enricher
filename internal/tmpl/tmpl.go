@@ -52,3 +52,14 @@ func Render(name, text string, data Data) (string, error) {
 	}
 	return buf.String(), nil
 }
+
+// Execute runs an already-compiled template. Rules compile their templates
+// once at engine build time and execute them per alert, so the parse cost
+// stays off the hot path — Render, which does both, is for one-shot uses.
+func Execute(t *template.Template, data Data) (string, error) {
+	var buf bytes.Buffer
+	if err := t.Execute(&buf, data); err != nil {
+		return "", fmt.Errorf("execute template %q: %w", t.Name(), err)
+	}
+	return buf.String(), nil
+}

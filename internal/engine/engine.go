@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"text/template"
 	"time"
 
 	"github.com/splattner/alertmanager-label-enricher/internal/alert"
@@ -37,6 +38,9 @@ type Result struct {
 	AnnotationsAdded       []string
 	AnnotationsOverwritten []string
 	AnnotationsDropped     []string
+	// DropsRefused lists labels a drop action declined to remove because
+	// they were the alert's last one - see the drop path in Apply.
+	DropsRefused []string
 }
 
 // RequiredFailure is returned when a `required: true` rule could not be
@@ -62,7 +66,8 @@ type compiledMatch struct {
 
 type compiledSet struct {
 	spec  config.SetAction
-	query *extract.Query // nil unless spec.From != nil
+	query *extract.Query     // nil unless spec.From != nil
+	tmpl  *template.Template // nil unless spec.Template != ""
 }
 
 type compiledRule struct {
@@ -101,6 +106,15 @@ func Compile(cfg *config.Config, sources Sources, queries *extract.Cache) (*Engi
 				continue
 			}
 			cs := compiledSet{spec: *a.Set}
+			if a.Set.Template != "" {
+				// Compiled once here rather than parsed per alert per rule
+				// on the hot path, matching how jq expressions are handled.
+				t, err := tmpl.Compile(setName(*a.Set), a.Set.Template)
+				if err != nil {
+					return nil, fmt.Errorf("rule %q: %w", r.Name, err)
+				}
+				cs.tmpl = t
+			}
 			if a.Set.From != nil {
 				q, err := queries.Compile(a.Set.From.Jq, a.Set.From.Regex)
 				if err != nil {
@@ -144,15 +158,27 @@ func (e *Engine) Apply(ctx context.Context, a alert.Alert) ([]Result, error) {
 				continue
 			}
 			m, name, isAnnotation := target(labels, annotations, action.Drop.Label, action.Drop.Annotation)
-			if _, exists := m[name]; exists {
-				if !rule.spec.DryRun {
-					delete(m, name)
-				}
-				if isAnnotation {
-					res.AnnotationsDropped = append(res.AnnotationsDropped, name)
-				} else {
-					res.Dropped = append(res.Dropped, name)
-				}
+			if _, exists := m[name]; !exists {
+				continue
+			}
+			// An alert with no labels at all is rejected by Alertmanager -
+			// and it rejects the entire POST, so one such alert strands
+			// every other alert in the batch, including other tenants'.
+			// The last label is load-bearing: refuse to remove it and keep
+			// the alert deliverable rather than emitting one that poisons
+			// the batch it travels in.
+			if !isAnnotation && len(labels) == 1 {
+				res.DropsRefused = append(res.DropsRefused, name)
+				metrics.LabelDropsRefusedTotal.WithLabelValues(rule.spec.Name, name).Inc()
+				continue
+			}
+			if !rule.spec.DryRun {
+				delete(m, name)
+			}
+			if isAnnotation {
+				res.AnnotationsDropped = append(res.AnnotationsDropped, name)
+			} else {
+				res.Dropped = append(res.Dropped, name)
 			}
 		}
 
@@ -219,7 +245,7 @@ func (e *Engine) resolveValue(ctx context.Context, set compiledSet, labels, anno
 		return spec.Value, true, nil
 
 	case spec.Template != "":
-		v, err := tmpl.Render(setName(spec), spec.Template, tmpl.Data{Labels: labels, Annotations: annotations})
+		v, err := tmpl.Execute(set.tmpl, tmpl.Data{Labels: labels, Annotations: annotations})
 		if err != nil {
 			return "", false, err
 		}

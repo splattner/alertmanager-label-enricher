@@ -148,6 +148,18 @@ func (s *Server) handleAlerts(w http.ResponseWriter, r *http.Request) {
 		s.log.Error("enrichment error", "error", err.Error())
 	}
 
+	// Alertmanager rejects an alert carrying no labels, and rejects the
+	// entire POST along with it - so one undeliverable alert would strand
+	// every other alert in the batch and Prometheus would retry the same
+	// payload indefinitely. Drop the individual offender instead. The
+	// engine already refuses to remove an alert's last label; this also
+	// covers alerts that arrived unlabelled.
+	alerts, unlabelled := alert.Deliverable(alerts)
+	if unlabelled > 0 {
+		metrics.AlertsDroppedTotal.WithLabelValues("no_labels").Add(float64(unlabelled))
+		s.log.Warn("dropped alerts with no labels from batch", "count", unlabelled)
+	}
+
 	out, err := alert.EncodeBatch(alerts)
 	if err != nil {
 		http.Error(w, "encode alerts: "+err.Error(), http.StatusInternalServerError)

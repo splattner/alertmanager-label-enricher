@@ -720,3 +720,79 @@ func TestPanicDuringEnrichmentIsContainedAndCounted(t *testing.T) {
 		t.Errorf("ale_enrichment_panics_total = %v, want %v", after, before+1)
 	}
 }
+
+// Second layer of ALE-03: an alert that arrives with no labels at all
+// (nothing the engine did) must not be forwarded, because Alertmanager
+// answers 400 for the whole POST and Prometheus then retries the same
+// payload forever.
+func TestUnlabelledAlertIsDroppedNotForwarded(t *testing.T) {
+	var received []byte
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer target.Close()
+
+	cfg := &config.Config{
+		Server:     config.ServerConfig{MaxBodyBytes: 1 << 20},
+		Targets:    []config.TargetConfig{{URL: target.URL}},
+		Forward:    config.ForwardConfig{MinSuccess: 1, Timeout: config.Duration(time.Second)},
+		Enrichment: config.EnrichmentConfig{Timeout: config.Duration(time.Second)},
+	}
+	srv := newTestServer(t, cfg)
+
+	before := testutil.ToFloat64(metrics.AlertsDroppedTotal.WithLabelValues("no_labels"))
+
+	body := `[{"labels":{}},{"labels":{"alertname":"Innocent"}},{"labels":{}}]`
+	req := httptest.NewRequest(http.MethodPost, "/api/v2/alerts", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	var got []map[string]any
+	if err := json.Unmarshal(received, &got); err != nil {
+		t.Fatalf("target received invalid JSON: %v (%s)", err, received)
+	}
+	if len(got) != 1 {
+		t.Fatalf("forwarded %d alerts, want only the labelled one: %s", len(got), received)
+	}
+	if got[0]["labels"].(map[string]any)["alertname"] != "Innocent" {
+		t.Errorf("the wrong alert survived: %v", got[0])
+	}
+	if after := testutil.ToFloat64(metrics.AlertsDroppedTotal.WithLabelValues("no_labels")); after != before+2 {
+		t.Errorf("ale_alerts_dropped_total{reason=\"no_labels\"} = %v, want %v", after, before+2)
+	}
+}
+
+// A batch consisting entirely of undeliverable alerts must still encode as
+// [] rather than null, and must not be reported as a failure.
+func TestBatchOfOnlyUnlabelledAlertsForwardsEmptyArray(t *testing.T) {
+	var received []byte
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer target.Close()
+
+	cfg := &config.Config{
+		Server:     config.ServerConfig{MaxBodyBytes: 1 << 20},
+		Targets:    []config.TargetConfig{{URL: target.URL}},
+		Forward:    config.ForwardConfig{MinSuccess: 1, Timeout: config.Duration(time.Second)},
+		Enrichment: config.EnrichmentConfig{Timeout: config.Duration(time.Second)},
+	}
+	srv := newTestServer(t, cfg)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v2/alerts", strings.NewReader(`[{"labels":{}}]`))
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if string(received) != "[]" {
+		t.Errorf("forwarded %q, want []", received)
+	}
+}

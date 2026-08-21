@@ -15,6 +15,7 @@ This is the complete reference for `config.yaml`. For a quick start, see the
 - [`rules`](#rules)
   - [`match`](#match)
   - [`actions`](#actions)
+  - [An alert's last label is never dropped](#an-alerts-last-label-is-never-dropped)
   - [Reserved labels](#reserved-labels)
   - [Evaluation order](#evaluation-order)
   - [Failure semantics](#failure-semantics)
@@ -40,6 +41,13 @@ rules: [ ... ]         # enrichment rules, evaluated in order
 Only `targets` and `rules` are required; everything else has a default.
 Config is YAML (or JSON, since YAML is a superset), loaded once at startup
 and re-validated on every [reload](#reloading).
+
+Parsing is **strict**: an unrecognised key is an error, not a silent
+no-op. A typo like `enrichmnt:` or `retires: 3` would otherwise parse
+cleanly, leave the default in place, and give `enricher check` nothing to
+report — a config change that looks applied but isn't is a poor failure
+mode for the component alert delivery runs through. Everything the enricher
+should ignore belongs in a YAML comment.
 
 ## `server`
 
@@ -273,6 +281,26 @@ context (a runbook link, an owning Slack channel, a dashboard URL) that
 you don't need to route or group on, that's what annotations are for —
 using a label for it means paying the fingerprint cost for no benefit.
 
+### An alert's last label is never dropped
+
+Alertmanager refuses an alert carrying no labels at all — and it refuses
+the **entire POST** along with it (`at least one label pair required`), so
+a single such alert strands every other alert in the batch, from every
+other tenant, and Prometheus retries the same payload indefinitely.
+
+So a `drop` that would remove an alert's only remaining label is skipped:
+the alert keeps that label and stays deliverable, and the refusal is
+counted in `ale_label_drops_refused_total{rule,label}`. This is per-alert,
+not per-rule — the same rule drops normally from any alert that has labels
+to spare. Annotations have no such constraint; an alert with zero
+annotations is perfectly valid.
+
+As a second line of defence, an alert that reaches the forwarding step
+with no labels — one that arrived that way, rather than anything a rule
+did — is dropped from the batch and counted in
+`ale_alerts_dropped_total{reason="no_labels"}` rather than being allowed
+to fail delivery for everything alongside it.
+
 ### Reserved labels
 
 `alertname` is Alertmanager's primary identifying label. Overwriting it
@@ -388,7 +416,8 @@ Served at `/metrics`, all under the `ale_` prefix:
 |---|---|---|
 | `ale_alerts_received_total` | — | alerts received from Prometheus, before enrichment |
 | `ale_alerts_forwarded_total` | `result` (`ok`\|`required_failed`\|`decode_error`\|`forward_failed`) | alert batches, by outcome |
-| `ale_alerts_dropped_total` | `reason` (`malformed`) | individual alerts dropped from an otherwise-forwarded batch — dropping one alert is deliberately preferred to rejecting the batch it arrived in |
+| `ale_alerts_dropped_total` | `reason` (`malformed`\|`no_labels`) | individual alerts dropped from an otherwise-forwarded batch — dropping one alert is deliberately preferred to rejecting the batch it arrived in |
+| `ale_label_drops_refused_total` | `rule`, `label` | a `drop` skipped because the label was the alert's last one (see [An alert's last label is never dropped](#an-alerts-last-label-is-never-dropped)) |
 | `ale_enrichment_panics_total` | — | panics recovered while enriching one alert. **Always a bug**; the alert is forwarded un-enriched rather than taking the process down. Any nonzero value warrants investigation |
 | `ale_rule_evaluations_total` | `rule`, `result` (`matched`\|`skipped`\|`required_failed`) | one rule's evaluation against one alert |
 | `ale_labels_added_total` | `rule`, `label` | a label newly added |

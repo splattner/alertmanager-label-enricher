@@ -620,3 +620,87 @@ func TestCancelledJqFailsOpenForNonRequiredRule(t *testing.T) {
 		t.Error("the alert's own labels must survive intact")
 	}
 }
+
+// ALE-03. Alertmanager rejects an alert with no labels, and rejects the
+// entire POST with it - so emitting one strands every other alert in the
+// batch. An alert's last label is load-bearing and must survive a drop.
+func TestDropRefusesToRemoveTheLastLabel(t *testing.T) {
+	cfg := &config.Config{Rules: []config.RuleConfig{{
+		Name:    "strip",
+		Actions: []config.ActionConfig{{Drop: &config.DropAction{Label: "alertname", Force: true}}},
+	}}}
+	eng, err := Compile(cfg, fakeRegistry{}, extract.NewCache())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	a := newAlert(map[string]string{"alertname": "OnlyLabel"})
+	results, err := eng.Apply(context.Background(), a)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	labels, err := a.Labels()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(labels) != 1 || labels["alertname"] != "OnlyLabel" {
+		t.Fatalf("labels = %v, want the last label kept so the alert stays deliverable", labels)
+	}
+	if len(results) != 1 || len(results[0].DropsRefused) != 1 || results[0].DropsRefused[0] != "alertname" {
+		t.Errorf("results = %+v, want the refusal recorded", results)
+	}
+	if len(results[0].Dropped) != 0 {
+		t.Errorf("Dropped = %v, want empty - nothing was actually dropped", results[0].Dropped)
+	}
+}
+
+// The guard is about the last label only: with more than one, dropping
+// works normally, including down to exactly one.
+func TestDropStillRemovesLabelsWhileOthersRemain(t *testing.T) {
+	cfg := &config.Config{Rules: []config.RuleConfig{{
+		Name: "strip",
+		Actions: []config.ActionConfig{
+			{Drop: &config.DropAction{Label: "team"}},
+			{Drop: &config.DropAction{Label: "env"}},
+		},
+	}}}
+	eng, err := Compile(cfg, fakeRegistry{}, extract.NewCache())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	a := newAlert(map[string]string{"alertname": "X", "team": "a", "env": "prod"})
+	if _, err := eng.Apply(context.Background(), a); err != nil {
+		t.Fatal(err)
+	}
+	labels, _ := a.Labels()
+	if len(labels) != 1 || labels["alertname"] != "X" {
+		t.Fatalf("labels = %v, want both droppable labels removed and alertname kept", labels)
+	}
+}
+
+// Annotations carry no such constraint - an alert with zero annotations is
+// perfectly deliverable.
+func TestDropRemovesTheLastAnnotation(t *testing.T) {
+	cfg := &config.Config{Rules: []config.RuleConfig{{
+		Name:    "strip",
+		Actions: []config.ActionConfig{{Drop: &config.DropAction{Annotation: "summary"}}},
+	}}}
+	eng, err := Compile(cfg, fakeRegistry{}, extract.NewCache())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	a := alert.Alert{
+		"labels":      map[string]any{"alertname": "X"},
+		"annotations": map[string]any{"summary": "only one"},
+	}
+	if _, err := eng.Apply(context.Background(), a); err != nil {
+		t.Fatal(err)
+	}
+	annotations, _ := a.Annotations()
+	if len(annotations) != 0 {
+		t.Fatalf("annotations = %v, want the last annotation dropped normally", annotations)
+	}
+}
