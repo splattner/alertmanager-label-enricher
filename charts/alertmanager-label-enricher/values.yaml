@@ -41,6 +41,21 @@ rbac:
   #     resources: ["namespaces"]
   #     verbs: ["get", "list", "watch"]
 
+crd:
+  # -- Installs the EnrichmentRule CustomResourceDefinition
+  # (enricher.splattner.github.io/v1alpha1). Cluster-scoped, so kept out
+  # of the default install as an explicit, once-per-cluster choice.
+  # Templated with helm.sh/resource-policy: keep - `helm uninstall` never
+  # deletes it, since deleting the CRD deletes every EnrichmentRule in the
+  # cluster, across every tenant namespace.
+  install: false
+  # -- Mirrors config.yaml's own `crd.enabled: true` (see
+  # docs/configuration.md) - set both together. When true, adds
+  # get/list/watch RBAC on enrichmentrules and namespaces to the
+  # enricher's ClusterRole, on top of `rbac.rules`. Requires
+  # rbac.create: true.
+  enabled: false
+
 podAnnotations: {}
 
 podSecurityContext:

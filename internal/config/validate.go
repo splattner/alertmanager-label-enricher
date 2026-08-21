@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/itchyny/gojq"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // Validate checks a Config for internal consistency: required fields,
@@ -95,31 +96,82 @@ func Validate(cfg *Config) error {
 		}
 		ruleNames[r.Name] = true
 
-		for j, m := range r.Match {
-			if m.Label == "" {
-				return fmt.Errorf("rules[%q].match[%d]: label is required", r.Name, j)
-			}
-			switch m.Op {
-			case OpExists, OpAbsent, OpEq, OpNe:
-			case OpRegex, OpNotRegex:
-				if _, err := regexp.Compile("^(?:" + m.Value + ")$"); err != nil {
-					return fmt.Errorf("rules[%q].match[%d]: invalid regex %q: %w", r.Name, j, m.Value, err)
-				}
-			default:
-				return fmt.Errorf("rules[%q].match[%d]: unknown op %q", r.Name, j, m.Op)
-			}
-		}
-
-		if len(r.Actions) == 0 {
-			return fmt.Errorf("rules[%q]: at least one action is required", r.Name)
-		}
-		for j, a := range r.Actions {
-			if err := validateAction(a, sourceNames); err != nil {
-				return fmt.Errorf("rules[%q].actions[%d]: %w", r.Name, j, err)
-			}
+		if err := ValidateRule(r, sourceNames); err != nil {
+			return fmt.Errorf("rules[%q]: %w", r.Name, err)
 		}
 	}
 
+	if err := validateEnforcement(&cfg.Enforcement, sourceNames); err != nil {
+		return fmt.Errorf("enforcement: %w", err)
+	}
+
+	return nil
+}
+
+// ValidateRule checks one rule's match/actions for internal consistency:
+// unknown matcher ops, uncompilable regex, at least one action, and (via
+// validateAction) exactly-one-of set/drop, exactly-one-of label/
+// annotation, undeclared source references, and uncompilable jq/regex.
+// r.Name is assumed already set and validated by the caller - this is
+// shared by file-config rules (Validate) and CR-sourced rules
+// (internal/enforce), which get identical semantic validation.
+func ValidateRule(r RuleConfig, sourceNames map[string]bool) error {
+	for j, m := range r.Match {
+		if err := validateMatch(m); err != nil {
+			return fmt.Errorf("match[%d]: %w", j, err)
+		}
+	}
+
+	if len(r.Actions) == 0 {
+		return fmt.Errorf("at least one action is required")
+	}
+	for j, a := range r.Actions {
+		if err := validateAction(a, sourceNames); err != nil {
+			return fmt.Errorf("actions[%d]: %w", j, err)
+		}
+	}
+	return nil
+}
+
+func validateMatch(m MatchConfig) error {
+	if m.Label == "" {
+		return fmt.Errorf("label is required")
+	}
+	switch m.Op {
+	case OpExists, OpAbsent, OpEq, OpNe:
+	case OpRegex, OpNotRegex:
+		if _, err := regexp.Compile("^(?:" + m.Value + ")$"); err != nil {
+			return fmt.Errorf("invalid regex %q: %w", m.Value, err)
+		}
+	default:
+		return fmt.Errorf("unknown op %q", m.Op)
+	}
+	return nil
+}
+
+// validateEnforcement checks the shape of the enforcement policy itself
+// (namespace selectors compile, matchers are well-formed, allowedSources
+// reference declared sources). It does not evaluate any CR against it -
+// that happens per-CR in internal/enforce.
+func validateEnforcement(e *EnforcementConfig, sourceNames map[string]bool) error {
+	for i, r := range e.Rules {
+		if _, err := metav1.LabelSelectorAsSelector(&r.NamespaceSelector); err != nil {
+			return fmt.Errorf("rules[%d].namespaceSelector: %w", i, err)
+		}
+		for j, m := range r.Match {
+			if err := validateMatch(m); err != nil {
+				return fmt.Errorf("rules[%d].match[%d]: %w", i, j, err)
+			}
+		}
+		for _, s := range r.AllowedSources {
+			if !sourceNames[s] {
+				return fmt.Errorf("rules[%d].allowedSources: %q is not a declared source", i, s)
+			}
+		}
+		if r.MaxRulesPerNamespace < 0 {
+			return fmt.Errorf("rules[%d].maxRulesPerNamespace must not be negative", i)
+		}
+	}
 	return nil
 }
 

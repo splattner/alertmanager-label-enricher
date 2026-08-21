@@ -24,6 +24,7 @@ This is the complete reference for `config.yaml`. For a quick start, see the
 - [Environment variable expansion](#environment-variable-expansion)
 - [Metrics](#metrics)
 - [Reloading](#reloading)
+- [EnrichmentRule CRD and tenancy](#enrichmentrule-crd-and-tenancy)
 
 ## Top-level structure
 
@@ -395,6 +396,8 @@ Served at `/metrics`, all under the `ale_` prefix:
 | `ale_forward_retries_total` | `target` | a retry attempt was made against a target |
 | `ale_config_reloads_total` | `result` (`ok`\|`error`) | a config reload attempt, from any trigger (initial load, `SIGHUP`, file watch, `POST /-/reload`) |
 | `ale_config_reload_success_timestamp_seconds` | — | unix time of the last successful reload |
+| `ale_crd_rules` | `namespace`, `state` (`accepted`\|`rejected`) | `EnrichmentRule` CRs currently known, by namespace |
+| `ale_crd_rules_rejected_total` | `namespace`, `reason` (`decode_error`\|`namespace_unreadable`\|`policy_violation`\|`max_rules_exceeded`) | a CR rejected, cumulative |
 
 `ale_labels_overwritten_total`/`ale_labels_dropped_total` exist specifically
 to make the fingerprint-changing blast radius from [`overwrite`](#actions)
@@ -420,3 +423,118 @@ on:
 A failed reload (parse error, validation error, or a new Kubernetes
 source's informer failing to sync) logs the error and leaves the
 previously running config serving traffic — it never partially applies.
+
+## EnrichmentRule CRD and tenancy
+
+Everything above lives in one admin-owned config file. `crd.enabled: true`
+adds a second, complementary rule source: namespaced `EnrichmentRule`
+custom resources, so an app team with `create`/`update` on
+`enrichmentrules` in their own namespace can manage their own enrichment
+without a PR against the platform team's config.
+
+```yaml
+apiVersion: enricher.splattner.github.io/v1alpha1
+kind: EnrichmentRule
+metadata:
+  name: runbook
+  namespace: payments
+spec:
+  match:   [ { label: severity, op: eq, value: critical } ]
+  actions: [ { set: { annotation: runbook_url, value: "https://wiki/payments" } } ]
+```
+
+`spec` is the same shape as one entry in `rules` (see [`rules`](#rules)
+above), minus `name` (taken from `metadata.name` instead), plus an
+optional `order: <int>` for deterministic sequencing among a namespace's
+own rules when it has more than one (file-config rules use their position
+in the YAML list for this; a CR has no equivalent). The compiled rule name
+is `<namespace>/<name>`, so it can never collide with a file-config rule
+or another namespace's rule of the same name.
+
+Requires a `kubernetes` source or equivalent RBAC either way: the watch
+itself needs `get`/`list`/`watch` on `enrichmentrules` and `namespaces`
+(the Helm chart's `crd.enabled=true` adds both automatically — see
+[Deploying](../README.md#deploying)).
+
+### The tenancy problem
+
+If any namespace can create an `EnrichmentRule`, what stops namespace A
+from rewriting namespace B's alerts? A rule with no `match` at all would
+otherwise mutate **every** alert in the stream, from any namespace.
+`enforcement` is the file config's answer — evaluated only against
+CR-sourced rules; rules declared directly in `rules` are admin-authored
+and untouched by it.
+
+```yaml
+crd:
+  enabled: true
+enforcement:
+  namespaceMatcherLabel: namespace   # inject `<label> == <CR's own namespace>` on every CR-sourced rule
+  rules:                              # first-match-wins on the CR's namespace's own labels
+    - namespaceSelector:
+        matchLabels: { tenant-isolation: enabled }
+      match: [ { label: cluster, op: eq, value: prod } ]   # extra authoritative matchers, ANDed in too
+      labels:
+        deny: ["severity", "team"]     # allow: [...] also supported - switches to an allow-list, deny ignored
+      annotations: {}                  # unrestricted by default - see "Why annotations are unrestricted" below
+      allowedSources: ["ns"]           # default: none
+      allowRequired: false
+      maxRulesPerNamespace: 50
+```
+
+| Threat | Control |
+|---|---|
+| A rule with no `match` mutates every alert in the stream | Injected `<namespaceMatcherLabel> == <CR's namespace>` matcher |
+| A tenant rewrites the namespace-scoping label itself, so their alert masquerades as another tenant's | That label is always unwritable by a CR-sourced rule, regardless of `labels.deny` |
+| Routing escalation — set `severity=critical` or `team=platform` to page someone else's on-call | `labels.deny` (or `labels.allow`) |
+| Exfiltration — `from: { source: <shared>, jq: '.data.token' }` copies whatever the enricher's ServiceAccount/credentials can read into a label or annotation, landing in a notification | `allowedSources`, default **none** |
+| Availability — `required: true` on a rule that always fails 503s the **whole batch**, not just the tenant's own alerts | `allowRequired`, default **false** |
+| Rule flooding | `maxRulesPerNamespace` |
+
+A namespace matching **no** `enforcement.rules` entry is fail-closed: CRs
+in it are not compiled into the engine at all, logged and counted (see
+[Metrics](#metrics)) rather than silently dropped. An entry with no
+`namespaceSelector` matches every namespace, so it's usable as a trailing
+catch-all after more specific entries.
+
+**`enforcement.rules` left entirely empty is deliberately different**:
+with `crd.enabled: true` and no policy at all, every CR-sourced rule
+passes through unrestricted, exactly like a file-config rule. This is
+single-tenant convenience mode - fine if you trust everyone who can create
+an `EnrichmentRule`, and it's what you get by just turning `crd.enabled`
+on without also writing an `enforcement` block. The enricher logs a
+startup warning naming the exposure so this isn't a silent footgun.
+
+### Why enforcement only ever adds matchers, never overrides them
+
+A rule's own matchers and the injected ones are combined with plain AND
+(the same ANDing every rule's `match` list already does). A tenant rule
+that names another namespace doesn't get "fixed" by having its matcher
+replaced - it ends up with two matchers on the same label that can never
+both be true, so it matches nothing, anywhere. This is simpler and
+strictly safer than detecting and overriding a conflicting matcher (which
+is what prompted this design's namesake in
+[giantswarm/silence-operator#698](https://github.com/giantswarm/silence-operator/pull/698)):
+there's no override logic to get wrong, and no risk of a rule silently
+applying with a materially different scope than what the tenant wrote.
+
+### Why annotations are unrestricted by default
+
+`labels`/`annotations` are independent policies. Labels default to
+deny-nothing-except-the-deny-list because overwriting or dropping one
+changes the alert's fingerprint in Alertmanager - the same reason
+[reserved labels](#reserved-labels) and `overwrite`/`force` exist for
+file-config rules. Annotations carry no such risk (see
+[`actions`](#actions)), so there's nothing to protect by default; `labels`
+and `annotations` can still be locked down independently via `deny`/`allow`
+if a specific deployment wants to.
+
+### Rejected rules
+
+A CR that fails to decode, whose namespace can't be read, or that
+enforcement rejects is skipped - logged and counted via
+`ale_crd_rules_rejected_total{namespace,reason}` - rather than blocking
+compilation of every other rule, from any namespace. As of this version
+that's the only feedback a tenant gets; there's no `status` condition or
+Kubernetes Event on the CR itself yet showing *why* it didn't take (a
+planned follow-up). Check the enricher's logs or that metric.

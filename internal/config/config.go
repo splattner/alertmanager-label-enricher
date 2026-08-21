@@ -8,17 +8,82 @@ import (
 	"regexp"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/yaml"
 )
 
 // Config is the enricher's top-level configuration.
 type Config struct {
-	Server     ServerConfig     `json:"server"`
-	Targets    []TargetConfig   `json:"targets"`
-	Forward    ForwardConfig    `json:"forward"`
-	Enrichment EnrichmentConfig `json:"enrichment"`
-	Sources    []SourceConfig   `json:"sources"`
-	Rules      []RuleConfig     `json:"rules"`
+	Server      ServerConfig      `json:"server"`
+	Targets     []TargetConfig    `json:"targets"`
+	Forward     ForwardConfig     `json:"forward"`
+	Enrichment  EnrichmentConfig  `json:"enrichment"`
+	Sources     []SourceConfig    `json:"sources"`
+	Rules       []RuleConfig      `json:"rules"`
+	CRD         CRDConfig         `json:"crd,omitempty"`
+	Enforcement EnforcementConfig `json:"enforcement,omitempty"`
+}
+
+// CRDConfig controls whether the enricher watches EnrichmentRule custom
+// resources (see internal/crd) in addition to the rules declared directly
+// in this file.
+type CRDConfig struct {
+	Enabled bool `json:"enabled,omitempty"`
+}
+
+// EnforcementConfig constrains what a namespaced EnrichmentRule CR is
+// allowed to do, so a tenant with create/update on enrichmentrules in
+// their own namespace cannot affect alerts belonging to another
+// namespace. Applies only to CR-sourced rules; rules declared directly in
+// this file are admin-authored and unrestricted by it.
+type EnforcementConfig struct {
+	// NamespaceMatcherLabel, if set, is injected as an authoritative
+	// `<label> == <the CR's own namespace>` matcher on every CR-sourced
+	// rule, and is implicitly added to every EnforcementRuleConfig's
+	// label deny list - a tenant can never override the label that scopes
+	// their own rules to their own namespace.
+	NamespaceMatcherLabel string `json:"namespaceMatcherLabel,omitempty"`
+	// Rules is evaluated against a CR's namespace's labels, first match
+	// wins (mirrors how giantswarm/silence-operator scopes silences). A
+	// namespace matching no entry means CRs in it are not compiled into
+	// the engine at all - fail closed, not fail open.
+	Rules []EnforcementRuleConfig `json:"rules,omitempty"`
+}
+
+// EnforcementRuleConfig is one namespace-selector-gated policy entry.
+type EnforcementRuleConfig struct {
+	NamespaceSelector metav1.LabelSelector `json:"namespaceSelector,omitempty"`
+	// Match lists additional authoritative matchers appended (ANDed) to
+	// every CR-sourced rule this entry governs, on top of
+	// NamespaceMatcherLabel.
+	Match []MatchConfig `json:"match,omitempty"`
+	// Labels/Annotations independently constrain which label/annotation
+	// names a CR-sourced rule's set/drop actions may target.
+	Labels      LabelPolicyConfig `json:"labels,omitempty"`
+	Annotations LabelPolicyConfig `json:"annotations,omitempty"`
+	// AllowedSources lists which of the file config's declared sources a
+	// CR-sourced rule's from.source may reference. Empty (the default)
+	// means none: a source lookup can read anything the enricher's
+	// ServiceAccount/credentials can reach, including secrets, so tenants
+	// get no sources unless explicitly granted one.
+	AllowedSources []string `json:"allowedSources,omitempty"`
+	// AllowRequired permits a CR-sourced rule to set required: true. A
+	// required rule that fails aborts the whole batch (503, not just the
+	// tenant's own alerts), so this defaults to false.
+	AllowRequired bool `json:"allowRequired,omitempty"`
+	// MaxRulesPerNamespace caps how many EnrichmentRule CRs from one
+	// namespace are compiled; 0 means unlimited.
+	MaxRulesPerNamespace int `json:"maxRulesPerNamespace,omitempty"`
+}
+
+// LabelPolicyConfig is a deny-by-default allow/deny list for label or
+// annotation names a CR-sourced rule may set/drop. If Allow is non-empty,
+// only names in Allow are permitted and Deny is ignored. Otherwise every
+// name is permitted except those listed in Deny (and, for labels,
+// EnforcementConfig.NamespaceMatcherLabel, which is always denied).
+type LabelPolicyConfig struct {
+	Allow []string `json:"allow,omitempty"`
+	Deny  []string `json:"deny,omitempty"`
 }
 
 // ServerConfig configures the enricher's own HTTP listener.

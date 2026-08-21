@@ -104,6 +104,18 @@ var (
 		Name:      "config_reload_success_timestamp_seconds",
 		Help:      "Unix timestamp of the last successful configuration reload.",
 	})
+
+	CRDRules = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "crd_rules",
+		Help:      "EnrichmentRule CRs currently known, by namespace and state.",
+	}, []string{"namespace", "state"}) // accepted | rejected
+
+	CRDRulesRejectedTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "crd_rules_rejected_total",
+		Help:      "EnrichmentRule CRs rejected, by namespace and reason.",
+	}, []string{"namespace", "reason"}) // decode_error | namespace_unreadable | policy_violation
 )
 
 // Registry returns a registry with all enricher metrics registered.
@@ -126,6 +138,8 @@ func Registry() *prometheus.Registry {
 		ForwardRetriesTotal,
 		ConfigReloadsTotal,
 		ConfigReloadSuccessTimestamp,
+		CRDRules,
+		CRDRulesRejectedTotal,
 	)
 	return reg
 }
