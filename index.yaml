@@ -2,6 +2,28 @@ apiVersion: v1
 entries:
   alertmanager-label-enricher:
   - apiVersion: v2
+    appVersion: 0.5.0
+    created: "2026-08-21T12:23:04.455151882Z"
+    description: Inline proxy that enriches Prometheus alert labels from Kubernetes,
+      HTTP, and file lookups before forwarding to Alertmanager
+    digest: 4540b8ae2eb44cf4ed9fa6062d292988561b0bf2f71cd8d72bc18ebbf2016be4
+    home: https://github.com/splattner/alertmanager-label-enricher
+    keywords:
+    - prometheus
+    - alertmanager
+    - alerting
+    - labels
+    maintainers:
+    - name: splattner
+      url: https://github.com/splattner
+    name: alertmanager-label-enricher
+    sources:
+    - https://github.com/splattner/alertmanager-label-enricher
+    type: application
+    urls:
+    - alertmanager-label-enricher-0.5.0.tgz
+    version: 0.5.0
+  - apiVersion: v2
     appVersion: 0.4.0
     created: "2026-08-20T20:18:11.221699698Z"
     description: Inline proxy that enriches Prometheus alert labels from Kubernetes,
@@ -67,4 +89,4 @@ entries:
     urls:
     - alertmanager-label-enricher-0.2.0.tgz
     version: 0.2.0
-generated: "2026-08-20T20:18:11.221713048Z"
+generated: "2026-08-21T12:23:04.455168967Z"
