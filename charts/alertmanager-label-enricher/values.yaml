@@ -6,7 +6,10 @@ replicaCount: 1
 
 image:
   repository: ghcr.io/splattner/alertmanager-label-enricher
-  # -- Defaults to the chart's appVersion.
+  # -- Defaults to "v<chart appVersion>" - GHCR images are published under
+  # their release tag (e.g. v0.4.0, with the v), not the bare semver
+  # Chart.yaml's appVersion holds. Set this explicitly (with or without a
+  # leading v) to override; an explicit value is used as-is, unprefixed.
   tag: ""
   pullPolicy: IfNotPresent
 
