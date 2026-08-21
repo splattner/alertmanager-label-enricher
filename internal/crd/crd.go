@@ -46,11 +46,22 @@ const readyCondition = "Ready"
 // OnChange call rather than rebuilding the engine once per object.
 const defaultDebounce = time.Second
 
+// defaultSyncTimeout bounds the initial list. Without it, a missing CRD or
+// a ServiceAccount that cannot list enrichmentrules leaves the reflector
+// retrying forever and Start blocking forever - which in cmd/enricher
+// means startup never reaches ListenAndServe: no listener, no error, no
+// crash, just a pod that never becomes ready. Failing with a diagnosable
+// error is strictly better than hanging.
+const defaultSyncTimeout = 60 * time.Second
+
 // Config configures a Watcher.
 type Config struct {
 	Enforcement config.EnforcementConfig
 	// Debounce defaults to 1s if zero.
 	Debounce time.Duration
+	// SyncTimeout bounds how long Start waits for the initial list of
+	// EnrichmentRules and Namespaces. Defaults to 60s if zero.
+	SyncTimeout time.Duration
 	// OnChange is called after Start, debounced, whenever a CR or
 	// Namespace object changes. The caller should re-fetch Rules() and
 	// recompile its engine; OnChange never learns what specifically
@@ -69,6 +80,7 @@ type Watcher struct {
 	client      dynamic.Interface
 	enforcement config.EnforcementConfig
 	debounce    time.Duration
+	syncTimeout time.Duration
 	onChange    func()
 	logf        func(format string, args ...any)
 
@@ -91,6 +103,10 @@ func New(client dynamic.Interface, cfg Config) *Watcher {
 	if debounce <= 0 {
 		debounce = defaultDebounce
 	}
+	syncTimeout := cfg.SyncTimeout
+	if syncTimeout <= 0 {
+		syncTimeout = defaultSyncTimeout
+	}
 	logf := cfg.Logf
 	if logf == nil {
 		logf = func(string, ...any) {}
@@ -108,6 +124,7 @@ func New(client dynamic.Interface, cfg Config) *Watcher {
 		client:         client,
 		enforcement:    cfg.Enforcement,
 		debounce:       debounce,
+		syncTimeout:    syncTimeout,
 		onChange:       onChange,
 		logf:           logf,
 		ruleInformer:   ruleInformer.Informer(),
@@ -138,8 +155,16 @@ func (w *Watcher) Start(ctx context.Context) error {
 	go w.ruleInformer.Run(ctx.Done())
 	go w.nsInformer.Run(ctx.Done())
 
-	if !cache.WaitForCacheSync(ctx.Done(), w.ruleInformer.HasSynced, w.nsInformer.HasSynced) {
-		return fmt.Errorf("crd: cache sync interrupted")
+	syncCtx, cancelSync := context.WithTimeout(ctx, w.syncTimeout)
+	defer cancelSync()
+	if !cache.WaitForCacheSync(syncCtx.Done(), w.ruleInformer.HasSynced, w.nsInformer.HasSynced) {
+		if ctx.Err() != nil {
+			return fmt.Errorf("crd: cache sync interrupted: %w", ctx.Err())
+		}
+		return fmt.Errorf("crd: timed out after %s waiting for the initial list of %s and namespaces. "+
+			"Check that the EnrichmentRule CRD is installed (Helm value crd.install) and that this "+
+			"ServiceAccount may list and watch both enrichmentrules and namespaces (Helm value crd.enabled "+
+			"adds that RBAC)", w.syncTimeout, GVR.Resource)
 	}
 
 	if len(w.enforcement.Rules) == 0 {

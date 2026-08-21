@@ -33,6 +33,13 @@ type Config struct {
 // periodic full relist, not the primary freshness mechanism (the watch is).
 const resyncPeriod = 10 * time.Minute
 
+// syncTimeout bounds the informer's initial list. Without it a missing
+// GVR or a ServiceAccount lacking list/watch on it leaves the reflector
+// retrying forever and Start blocking forever, so cmd/enricher never
+// reaches ListenAndServe - a pod with no listener, no error and no crash.
+// Failing with a diagnosable error beats hanging.
+const syncTimeout = 60 * time.Second
+
 // Source is a lookup source backed by a watch-and-cache informer over one
 // Kubernetes resource (GVR).
 type Source struct {
@@ -84,8 +91,16 @@ func (s *Source) HasSynced() bool { return s.informer.HasSynced() }
 // synced or ctx is cancelled.
 func (s *Source) Start(ctx context.Context) error {
 	go s.informer.Run(ctx.Done())
-	if !cache.WaitForCacheSync(ctx.Done(), s.informer.HasSynced) {
-		return fmt.Errorf("kubernetes source %q: cache sync interrupted for %s", s.name, s.cfg.GVR)
+
+	syncCtx, cancel := context.WithTimeout(ctx, syncTimeout)
+	defer cancel()
+	if !cache.WaitForCacheSync(syncCtx.Done(), s.informer.HasSynced) {
+		if ctx.Err() != nil {
+			return fmt.Errorf("kubernetes source %q: cache sync interrupted for %s: %w", s.name, s.cfg.GVR, ctx.Err())
+		}
+		return fmt.Errorf("kubernetes source %q: timed out after %s waiting for the initial list of %s. "+
+			"Check that the resource exists and that this ServiceAccount may list and watch it (Helm value rbac.rules)",
+			s.name, syncTimeout, s.cfg.GVR)
 	}
 	return nil
 }

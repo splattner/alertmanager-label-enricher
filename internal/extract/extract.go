@@ -18,10 +18,11 @@ type Query struct {
 	regex *regexp.Regexp
 }
 
-// varNames are bound as $labels / $annotations in every compiled query, so
+// VarNames are bound as $labels / $annotations in every compiled query, so
 // alert values reach jq without ever being interpolated into the expression
-// text.
-var varNames = []string{"$labels", "$annotations"}
+// text. Exported so config validation compiles a rule's jq under exactly
+// the same variable bindings the engine will, rather than approximating it.
+var VarNames = []string{"$labels", "$annotations"}
 
 // Compile parses and compiles a jq expression. regexSrc may be empty.
 func Compile(jqSrc, regexSrc string) (*Query, error) {
@@ -29,7 +30,7 @@ func Compile(jqSrc, regexSrc string) (*Query, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse jq %q: %w", jqSrc, err)
 	}
-	code, err := gojq.Compile(parsed, gojq.WithVariables(varNames))
+	code, err := gojq.Compile(parsed, gojq.WithVariables(VarNames))
 	if err != nil {
 		return nil, fmt.Errorf("compile jq %q: %w", jqSrc, err)
 	}

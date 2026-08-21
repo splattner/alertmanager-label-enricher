@@ -18,6 +18,13 @@ type Alert map[string]any
 // Labels returns the alert's label map, creating it if absent. The returned
 // map aliases the alert's own storage, so mutations are visible immediately.
 func (a Alert) Labels() (map[string]string, error) {
+	if a == nil {
+		// JSON null decodes to a nil map. Writing to one panics, and
+		// enrichment runs on goroutines nothing recovers, so that panic
+		// would take the whole process down. DecodeBatch already drops
+		// these; this is the second line of defence.
+		return nil, fmt.Errorf("alert is null")
+	}
 	raw, ok := a["labels"]
 	if !ok || raw == nil {
 		labels := map[string]string{}
@@ -48,6 +55,9 @@ func (a Alert) Labels() (map[string]string, error) {
 // The returned map aliases the alert's own storage, so mutations are
 // visible immediately - mirroring Labels().
 func (a Alert) Annotations() (map[string]string, error) {
+	if a == nil {
+		return nil, fmt.Errorf("alert is null")
+	}
 	raw, ok := a["annotations"]
 	if !ok || raw == nil {
 		annotations := map[string]string{}
@@ -75,13 +85,27 @@ func (a Alert) Annotations() (map[string]string, error) {
 }
 
 // DecodeBatch parses a Prometheus alert batch, preserving unknown fields on
-// every alert.
-func DecodeBatch(data []byte) ([]Alert, error) {
-	var alerts []Alert
-	if err := json.Unmarshal(data, &alerts); err != nil {
-		return nil, fmt.Errorf("decode alert batch: %w", err)
+// every alert. Entries that decoded to null are dropped and reported in
+// malformed rather than failing the batch: a null carries no alert to
+// deliver, and rejecting the whole POST over one would strand every valid
+// alert alongside it - Prometheus would just retry the same payload
+// forever. The returned slice is never nil, so an empty or null body
+// re-encodes as [] rather than the literal null.
+func DecodeBatch(data []byte) (alerts []Alert, malformed int, err error) {
+	var decoded []Alert
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return nil, 0, fmt.Errorf("decode alert batch: %w", err)
 	}
-	return alerts, nil
+
+	alerts = make([]Alert, 0, len(decoded))
+	for _, a := range decoded {
+		if a == nil {
+			malformed++
+			continue
+		}
+		alerts = append(alerts, a)
+	}
+	return alerts, malformed, nil
 }
 
 // EncodeBatch re-serializes a batch after enrichment.

@@ -49,6 +49,20 @@ spec:
               alert batches are not being forwarded to Alertmanager, and
               Prometheus is retrying them.
 
+        - alert: AlertmanagerLabelEnricherEnrichmentPanicking
+          expr: increase(ale_enrichment_panics_total{namespace="{{ .Release.Namespace }}"}[15m]) > 0
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            summary: The enricher recovered a panic while enriching an alert
+            description: >-
+              {{ "{{ $value }}" }} panic(s) recovered in the last 15 minutes.
+              Affected alerts were forwarded un-enriched rather than taking
+              the process down, so delivery continues - but a panic is always
+              a bug and the enrichment those alerts should have received did
+              not happen. Check the enricher's logs for the recorded stack.
+
         - alert: AlertmanagerLabelEnricherConfigReloadFailing
           expr: increase(ale_config_reloads_total{namespace="{{ .Release.Namespace }}", result="error"}[15m]) > 0
           for: 5m

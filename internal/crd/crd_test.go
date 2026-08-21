@@ -2,13 +2,17 @@ package crd
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
+	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/splattner/alertmanager-label-enricher/internal/config"
 )
@@ -215,5 +219,67 @@ func TestWatcherRejectsCRWithNoSpec(t *testing.T) {
 	rules := w.Rules()
 	if len(rules) != 0 {
 		t.Fatalf("Rules() = %+v, want the spec-less CR rejected, not panicked on", rules)
+	}
+}
+
+// A missing CRD or a ServiceAccount that cannot list enrichmentrules must
+// fail with a diagnosable error rather than blocking forever. In
+// cmd/enricher the context passed here is the process signal context,
+// which nothing cancels during startup - so an unbounded wait means the
+// pod never starts its listener and never crashes either (ALE-06).
+func TestStartTimesOutWhenListIsRefused(t *testing.T) {
+	client := newFakeClient(t)
+	client.PrependReactor("list", "enrichmentrules", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewForbidden(
+			schema.GroupResource{Group: GVR.Group, Resource: GVR.Resource}, "",
+			errors.New("cannot list resource"))
+	})
+
+	w := New(client, Config{
+		Enforcement: config.EnforcementConfig{},
+		SyncTimeout: 300 * time.Millisecond,
+	})
+
+	done := make(chan error, 1)
+	go func() { done <- w.Start(context.Background()) }()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Start returned nil despite the initial list never succeeding")
+		}
+		for _, want := range []string{"timed out", "crd.install", "crd.enabled"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not mention %q - it must say how to fix the misconfiguration", err, want)
+			}
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Start blocked well past its SyncTimeout; the sync wait is still unbounded")
+	}
+}
+
+// Shutdown must be distinguishable from a misconfiguration.
+func TestStartReportsCancellationDistinctly(t *testing.T) {
+	client := newFakeClient(t)
+	client.PrependReactor("list", "enrichmentrules", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewForbidden(
+			schema.GroupResource{Group: GVR.Group, Resource: GVR.Resource}, "", errors.New("nope"))
+	})
+
+	w := New(client, Config{SyncTimeout: 30 * time.Second})
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan error, 1)
+	go func() { done <- w.Start(ctx) }()
+	time.Sleep(200 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "interrupted") {
+			t.Fatalf("err = %v, want an 'interrupted' error naming the cancellation", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Start did not return after its context was cancelled")
 	}
 }

@@ -516,7 +516,7 @@ func TestEnrichBoundsConcurrencyByMaxConcurrency(t *testing.T) {
 
 	var alerts []alert.Alert
 	for i := 0; i < alertCount; i++ {
-		batch, err := alert.DecodeBatch([]byte(fmt.Sprintf(`[{"labels":{"alertname":"Test%d"}}]`, i)))
+		batch, _, err := alert.DecodeBatch([]byte(fmt.Sprintf(`[{"labels":{"alertname":"Test%d"}}]`, i)))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -602,5 +602,121 @@ func TestForwardStragglerSurvivesRequestContextCancellation(t *testing.T) {
 	case <-slowDone:
 	case <-time.After(time.Second):
 		t.Fatal("forward to the slow target was aborted by request context cancellation instead of finishing in the background")
+	}
+}
+
+// The headline availability guarantee: no single alert in a batch may be
+// able to terminate the process. Enrichment runs on errgroup goroutines,
+// which net/http does not recover, so before ALE-01 was fixed this exact
+// request killed the enricher outright.
+func TestNullAlertDoesNotCrashAndBatchStillForwards(t *testing.T) {
+	var received []byte
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer target.Close()
+
+	cfg := &config.Config{
+		Server:     config.ServerConfig{MaxBodyBytes: 1 << 20},
+		Targets:    []config.TargetConfig{{URL: target.URL}},
+		Forward:    config.ForwardConfig{MinSuccess: 1, Timeout: config.Duration(time.Second)},
+		Enrichment: config.EnrichmentConfig{Timeout: config.Duration(time.Second)},
+		Rules: []config.RuleConfig{{
+			Name:    "mark",
+			Actions: []config.ActionConfig{{Set: &config.SetAction{Label: "team", Value: "platform"}}},
+		}},
+	}
+	srv := newTestServer(t, cfg)
+
+	before := testutil.ToFloat64(metrics.AlertsDroppedTotal.WithLabelValues("malformed"))
+
+	body := `[null,{"labels":{"alertname":"Real"}},null]`
+	req := httptest.NewRequest(http.MethodPost, "/api/v2/alerts", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	var got []map[string]any
+	if err := json.Unmarshal(received, &got); err != nil {
+		t.Fatalf("target received invalid JSON: %v (%s)", err, received)
+	}
+	if len(got) != 1 {
+		t.Fatalf("forwarded %d alerts, want only the one real alert: %s", len(got), received)
+	}
+	if got[0]["labels"].(map[string]any)["team"] != "platform" {
+		t.Errorf("the surviving alert was not enriched: %v", got[0])
+	}
+
+	if after := testutil.ToFloat64(metrics.AlertsDroppedTotal.WithLabelValues("malformed")); after != before+2 {
+		t.Errorf("ale_alerts_dropped_total{reason=\"malformed\"} = %v, want %v", after, before+2)
+	}
+}
+
+// panicSource exists to prove the backstop covers panics from anywhere
+// reachable during enrichment, not just the one nil-map bug that motivated
+// it. Without the recover in enrich, this test kills the test binary.
+type panicSource struct{}
+
+func (panicSource) Name() string                { return "boom" }
+func (panicSource) Start(context.Context) error { return nil }
+func (panicSource) HasSynced() bool             { return true }
+func (panicSource) Lookup(context.Context, source.LookupInput) (any, error) {
+	panic("source blew up mid-lookup")
+}
+
+type panicRegistry struct{}
+
+func (panicRegistry) Get(string) (source.Source, bool) { return panicSource{}, true }
+
+func TestPanicDuringEnrichmentIsContainedAndCounted(t *testing.T) {
+	var received []byte
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer target.Close()
+
+	cfg := &config.Config{
+		Server:     config.ServerConfig{MaxBodyBytes: 1 << 20},
+		Targets:    []config.TargetConfig{{URL: target.URL}},
+		Forward:    config.ForwardConfig{MinSuccess: 1, Timeout: config.Duration(time.Second)},
+		Enrichment: config.EnrichmentConfig{Timeout: config.Duration(time.Second)},
+		Sources:    []config.SourceConfig{{Name: "boom", Type: "file", File: &config.FileSourceSpec{Path: "unused"}}},
+		Rules: []config.RuleConfig{{
+			Name: "explode",
+			Actions: []config.ActionConfig{{Set: &config.SetAction{
+				Label: "team",
+				From:  &config.FromConfig{Source: "boom", Jq: "."},
+			}}},
+		}},
+	}
+	if err := config.Validate(cfg); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	eng, err := engine.Compile(cfg, panicRegistry{}, extract.NewCache())
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	srv := New(discardLogger())
+	srv.SetState(&State{Cfg: cfg, Engine: eng, Synced: func() bool { return true }})
+
+	before := testutil.ToFloat64(metrics.EnrichmentPanicsTotal)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v2/alerts", strings.NewReader(`[{"labels":{"alertname":"Real"}}]`))
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(string(received), `"alertname":"Real"`) {
+		t.Errorf("the alert should still be forwarded un-enriched, got %s", received)
+	}
+	if after := testutil.ToFloat64(metrics.EnrichmentPanicsTotal); after != before+1 {
+		t.Errorf("ale_enrichment_panics_total = %v, want %v", after, before+1)
 	}
 }
