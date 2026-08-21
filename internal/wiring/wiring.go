@@ -106,8 +106,12 @@ func BuildEngine(cfg *config.Config, sources engine.Sources) (*engine.Engine, er
 	return engine.Compile(cfg, sources, extract.NewCache())
 }
 
-// NeedsKubeClient reports whether cfg declares any kubernetes source.
+// NeedsKubeClient reports whether cfg declares any kubernetes source or has
+// the EnrichmentRule CRD watch enabled - both need a dynamic client.
 func NeedsKubeClient(cfg *config.Config) bool {
+	if cfg.CRD.Enabled {
+		return true
+	}
 	for _, s := range cfg.Sources {
 		if s.Type == "kubernetes" {
 			return true

@@ -3,6 +3,8 @@ package config
 import (
 	"strings"
 	"testing"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func validConfig() *Config {
@@ -242,6 +244,57 @@ func TestValidateRejectsForwardTLSUnpairedClientCert(t *testing.T) {
 	cfg := validConfig()
 	cfg.Forward.TLS = &ClientTLSSpec{CertFile: "client.pem"}
 	assertRejects(t, cfg, "forward.tls")
+}
+
+func TestValidateAcceptsWellFormedEnforcement(t *testing.T) {
+	cfg := validConfig()
+	cfg.CRD.Enabled = true
+	cfg.Enforcement = EnforcementConfig{
+		NamespaceMatcherLabel: "namespace",
+		Rules: []EnforcementRuleConfig{{
+			NamespaceSelector: metav1.LabelSelector{MatchLabels: map[string]string{"tenant-isolation": "enabled"}},
+			Match:             []MatchConfig{{Label: "cluster", Op: OpEq, Value: "prod"}},
+			Labels:            LabelPolicyConfig{Deny: []string{"severity", "team"}},
+			AllowedSources:    []string{"ns"},
+		}},
+	}
+	if err := Validate(cfg); err != nil {
+		t.Fatalf("expected valid config to pass, got: %v", err)
+	}
+}
+
+func TestValidateRejectsEnforcementInvalidNamespaceSelector(t *testing.T) {
+	cfg := validConfig()
+	cfg.Enforcement.Rules = []EnforcementRuleConfig{{
+		NamespaceSelector: metav1.LabelSelector{MatchExpressions: []metav1.LabelSelectorRequirement{
+			{Key: "team", Operator: "InvalidOp"},
+		}},
+	}}
+	assertRejects(t, cfg, "namespaceSelector")
+}
+
+func TestValidateRejectsEnforcementInvalidMatchOp(t *testing.T) {
+	cfg := validConfig()
+	cfg.Enforcement.Rules = []EnforcementRuleConfig{{
+		Match: []MatchConfig{{Label: "cluster", Op: "bogus"}},
+	}}
+	assertRejects(t, cfg, "unknown op")
+}
+
+func TestValidateRejectsEnforcementUndeclaredAllowedSource(t *testing.T) {
+	cfg := validConfig()
+	cfg.Enforcement.Rules = []EnforcementRuleConfig{{
+		AllowedSources: []string{"does-not-exist"},
+	}}
+	assertRejects(t, cfg, "not a declared source")
+}
+
+func TestValidateRejectsEnforcementNegativeMaxRules(t *testing.T) {
+	cfg := validConfig()
+	cfg.Enforcement.Rules = []EnforcementRuleConfig{{
+		MaxRulesPerNamespace: -1,
+	}}
+	assertRejects(t, cfg, "maxRulesPerNamespace")
 }
 
 func assertRejects(t *testing.T, cfg *Config, wantSubstr string) {

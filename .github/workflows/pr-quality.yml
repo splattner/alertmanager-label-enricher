@@ -162,3 +162,29 @@ jobs:
                   # The alert-templating trick ({{ "{{ $labels.x }}" }}) must
                   # render literally, not get evaluated as a Helm variable.
                   grep -q '{{ $labels.instance }}' /tmp/render-prometheusrule.yaml
+
+            - name: Render chart (EnrichmentRule CRD + RBAC)
+              run: |
+                  helm template ale ./charts/alertmanager-label-enricher \
+                    --set crd.install=true \
+                    > /tmp/render-crd.yaml
+                  grep -q 'kind: CustomResourceDefinition' /tmp/render-crd.yaml
+                  grep -q 'name: enrichmentrules.enricher.splattner.github.io' /tmp/render-crd.yaml
+                  grep -q 'helm.sh/resource-policy: keep' /tmp/render-crd.yaml
+
+                  helm template ale ./charts/alertmanager-label-enricher \
+                    --set rbac.create=true \
+                    --set crd.enabled=true \
+                    --set-json 'rbac.rules=[{"apiGroups":[""],"resources":["namespaces"],"verbs":["get","list","watch"]}]' \
+                    > /tmp/render-crd-rbac.yaml
+                  grep -q 'enrichmentrules' /tmp/render-crd-rbac.yaml
+                  # The RBAC auto-added for crd.enabled must merge with,
+                  # not replace, any hand-written rbac.rules.
+                  grep -c 'namespaces' /tmp/render-crd-rbac.yaml | grep -q '^2$'
+
+                  # Default render has neither.
+                  helm template ale ./charts/alertmanager-label-enricher > /tmp/render-default.yaml
+                  if grep -q 'CustomResourceDefinition\|enrichmentrules' /tmp/render-default.yaml; then
+                    echo "expected the default render to contain neither the CRD nor its RBAC" >&2
+                    exit 1
+                  fi

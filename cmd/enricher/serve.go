@@ -20,8 +20,10 @@ import (
 	"k8s.io/client-go/dynamic"
 
 	"github.com/splattner/alertmanager-label-enricher/internal/config"
+	"github.com/splattner/alertmanager-label-enricher/internal/crd"
 	"github.com/splattner/alertmanager-label-enricher/internal/metrics"
 	"github.com/splattner/alertmanager-label-enricher/internal/proxy"
+	fileSource "github.com/splattner/alertmanager-label-enricher/internal/source"
 	"github.com/splattner/alertmanager-label-enricher/internal/tlsutil"
 	"github.com/splattner/alertmanager-label-enricher/internal/wiring"
 )
@@ -49,7 +51,32 @@ func runServe(configPath string) error {
 
 	var genCancel atomic.Pointer[context.CancelFunc]
 
-	applyConfig := func() error {
+	// generation holds everything that's expensive to rebuild and only
+	// changes when the file config itself changes: sources (which starts
+	// Kubernetes informers), TLS configs, and the CRD watcher (which
+	// starts its own informers). compileAndSwap, below, reuses the
+	// current generation's sources/watcher and only recompiles the
+	// engine - so a CR-only change (the common case once the CRD watch is
+	// enabled) never restarts a Kubernetes source informer or flaps
+	// /readyz the way rebuilding everything would.
+	type generation struct {
+		cfg           *config.Config
+		sources       *fileSource.Registry
+		watcher       *crd.Watcher
+		forwardClient *http.Client
+		serverTLS     *tls.Config
+	}
+	var currentGen atomic.Pointer[generation]
+
+	// compileAndSwap recompiles the engine from the current generation's
+	// file-config rules plus (if the CRD watch is enabled) whatever
+	// EnrichmentRule CRs internal/crd currently accepts, and atomically
+	// swaps it into the running server. Declared as a var so the CRD
+	// watcher's OnChange callback (built inside buildGeneration, below)
+	// can reference it before it's assigned.
+	var compileAndSwap func() error
+
+	buildGeneration := func() error {
 		cfg, err := config.Load(configPath)
 		if err != nil {
 			return err
@@ -66,10 +93,6 @@ func runServe(configPath string) error {
 		sources, err := wiring.BuildSources(cfg, kubeClient, func(format string, args ...any) {
 			log.Info(fmt.Sprintf(format, args...))
 		})
-		if err != nil {
-			return err
-		}
-		eng, err := wiring.BuildEngine(cfg, sources)
 		if err != nil {
 			return err
 		}
@@ -98,18 +121,77 @@ func runServe(configPath string) error {
 			return err
 		}
 
-		srv.SetState(&proxy.State{
-			Cfg:           cfg,
-			Engine:        eng,
-			Synced:        sources.HasSynced,
-			ForwardClient: forwardClient,
-			ServerTLS:     serverTLS,
+		var watcher *crd.Watcher
+		if cfg.CRD.Enabled {
+			watcher = crd.New(kubeClient, crd.Config{
+				Enforcement: cfg.Enforcement,
+				Logf: func(format string, args ...any) {
+					log.Info(fmt.Sprintf(format, args...))
+				},
+				OnChange: func() {
+					if err := compileAndSwap(); err != nil {
+						log.Error("recompile after EnrichmentRule change failed", "error", err.Error())
+						return
+					}
+					log.Info("engine recompiled after EnrichmentRule change")
+				},
+			})
+			if err := watcher.Start(genCtx); err != nil {
+				cancel()
+				return fmt.Errorf("start crd watcher: %w", err)
+			}
+		}
+
+		currentGen.Store(&generation{
+			cfg:           cfg,
+			sources:       sources,
+			watcher:       watcher,
+			forwardClient: forwardClient,
+			serverTLS:     serverTLS,
 		})
 
 		if prev := genCancel.Swap(&cancel); prev != nil {
 			(*prev)()
 		}
 		return nil
+	}
+
+	compileAndSwap = func() error {
+		gen := currentGen.Load()
+		if gen == nil {
+			return fmt.Errorf("no configuration generation built yet")
+		}
+
+		engineCfg := *gen.cfg
+		if gen.watcher != nil {
+			engineCfg.Rules = append(append([]config.RuleConfig{}, gen.cfg.Rules...), gen.watcher.Rules()...)
+		}
+		eng, err := wiring.BuildEngine(&engineCfg, gen.sources)
+		if err != nil {
+			return err
+		}
+
+		synced := gen.sources.HasSynced
+		if gen.watcher != nil {
+			w := gen.watcher
+			synced = func() bool { return gen.sources.HasSynced() && w.HasSynced() }
+		}
+
+		srv.SetState(&proxy.State{
+			Cfg:           gen.cfg,
+			Engine:        eng,
+			Synced:        synced,
+			ForwardClient: gen.forwardClient,
+			ServerTLS:     gen.serverTLS,
+		})
+		return nil
+	}
+
+	applyConfig := func() error {
+		if err := buildGeneration(); err != nil {
+			return err
+		}
+		return compileAndSwap()
 	}
 
 	reload := recordReload(applyConfig)

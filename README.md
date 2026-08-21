@@ -182,6 +182,16 @@ If any source has type `kubernetes`, set `rbac.create=true` and list the
 resources it needs under `rbac.rules`. Plain manifests are also available
 under [deploy/manifests](deploy/manifests) for non-Helm deployments.
 
+To let app teams manage their own enrichment via namespaced
+`EnrichmentRule` CRs instead of (or alongside) the file config, set
+`crd.install=true` once per cluster (installs the CRD; kept out of the
+default install since it's cluster-scoped and `helm uninstall` never
+removes it) and `rbac.create=true --set crd.enabled=true` on the release
+(adds the RBAC the watch needs). You still need `crd: { enabled: true }`
+and an `enforcement` policy in `config`'s own YAML for the enricher to
+actually watch and enforce tenancy on them — see
+[docs/configuration.md#enrichmentrule-crd-and-tenancy](docs/configuration.md#enrichmentrule-crd-and-tenancy).
+
 `podDisruptionBudget.enabled` and `networkPolicy.enabled` are both off by
 default. Turn on `podDisruptionBudget` once `replicaCount` is above 1 — at
 the default of 1, a PDB requiring an available pod blocks node drains
