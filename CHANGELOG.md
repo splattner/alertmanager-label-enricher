@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.5.0](https://github.com/splattner/alertmanager-label-enricher/compare/v0.4.0...v0.5.0) (2026-08-21)
+
+
+### Features
+
+* add EnrichmentRule CRD with per-namespace tenancy enforcement ([0a05288](https://github.com/splattner/alertmanager-label-enricher/commit/0a05288e99c33d533d5e49e79fc531e6f5d5d05e))
+* add EnrichmentRule CRD with per-namespace tenancy enforcement ([d1eb939](https://github.com/splattner/alertmanager-label-enricher/commit/d1eb939c0efd5197d796912682d9fe62fd9a30a1))
+* **crd:** report EnrichmentRule status conditions and Events ([7df4b91](https://github.com/splattner/alertmanager-label-enricher/commit/7df4b9157cf3285aa13fc0b91d9f8e983b7bf778))
+* **crd:** report EnrichmentRule status conditions and Events ([5bb9469](https://github.com/splattner/alertmanager-label-enricher/commit/5bb9469addc779344288c95e81f9f213d636f806))
+
+
+### Bug Fixes
+
+* **chart:** image tag default was missing the v prefix GHCR images use ([c5d4a02](https://github.com/splattner/alertmanager-label-enricher/commit/c5d4a02686fa0fe07ad357429ddeb5aceacfe150))
+* **chart:** image tag default was missing the v prefix GHCR images use ([7db3539](https://github.com/splattner/alertmanager-label-enricher/commit/7db35394be8b05ef46fd6fea48881066b32a168a))
+* correct lookup caching, action ordering and failure diagnostics ([804af03](https://github.com/splattner/alertmanager-label-enricher/commit/804af036a84739de11c2f43077a580c0c1eeba48))
+* correct lookup caching, action ordering and failure diagnostics ([1ef46bd](https://github.com/splattner/alertmanager-label-enricher/commit/1ef46bd9d901dea05936541f0da2babf1f658511))
+* **crd:** drop unused ns parameter from maxRulesFor ([56a8682](https://github.com/splattner/alertmanager-label-enricher/commit/56a86824968ae0512ce8e9db6fc06e504b2b74f0))
+* **crd:** keep alert delivery independent of CR status writes and rule count ([8634c30](https://github.com/splattner/alertmanager-label-enricher/commit/8634c301a15673a7dc020aa8cadd89ebac4923d3))
+* **crd:** keep alert delivery independent of CR status writes and rule count ([ca6566f](https://github.com/splattner/alertmanager-label-enricher/commit/ca6566fc43f46b3e24dd2a009292d1c41513e774))
+* **crd:** stop one tenant's rule from taking down everyone else's alerting ([6e5bff1](https://github.com/splattner/alertmanager-label-enricher/commit/6e5bff1d817dfeba4ffd201e69b6d0d23ca6939f))
+* **crd:** stop one tenant's rule from taking down everyone else's alerting ([850115f](https://github.com/splattner/alertmanager-label-enricher/commit/850115fb629c234e5a0b7ed5aa9788f6915e7f66))
+* stop a malformed alert, a bad reload or missing RBAC from breaking delivery ([c7cfc05](https://github.com/splattner/alertmanager-label-enricher/commit/c7cfc0591f8df0901c3940f5a0fd51202b54f711))
+* stop a malformed alert, a bad reload or missing RBAC from breaking delivery ([9b9b4fa](https://github.com/splattner/alertmanager-label-enricher/commit/9b9b4fa3f623e733b095e1ebf2264a3dcfe4ad6e))
+* **test:** put context first in awaitReadyCondition ([49478e6](https://github.com/splattner/alertmanager-label-enricher/commit/49478e69a0c9af2a86ba1d5e796cc594472a75ef))
+* validate what goes out to Alertmanager, and what comes in from config ([e74b633](https://github.com/splattner/alertmanager-label-enricher/commit/e74b633361e5fc8791f8137b1eda0aac30a48084))
+* validate what goes out to Alertmanager, and what comes in from config ([d099fd8](https://github.com/splattner/alertmanager-label-enricher/commit/d099fd8b27956ef9fc947204b730822459d78b21))
+
 ## [0.4.0](https://github.com/splattner/alertmanager-label-enricher/compare/v0.3.0...v0.4.0) (2026-08-20)
 
 
