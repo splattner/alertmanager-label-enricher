@@ -226,7 +226,7 @@ func (w *Watcher) Rules() []config.RuleConfig {
 			continue
 		}
 
-		if limit := w.maxRulesFor(c.ns, nsLabels); limit > 0 && acceptedByNS[c.ns] >= limit {
+		if limit := w.maxRulesFor(nsLabels); limit > 0 && acceptedByNS[c.ns] >= limit {
 			w.recordRejected(c.ns, "max_rules_exceeded")
 			w.logf("crd: reject EnrichmentRule %s/%s: namespace already has the maximum %d rule(s)", c.ns, c.name, limit)
 			rejectedByNS[c.ns]++
@@ -241,7 +241,7 @@ func (w *Watcher) Rules() []config.RuleConfig {
 	return out
 }
 
-func (w *Watcher) maxRulesFor(ns string, nsLabels map[string]string) int {
+func (w *Watcher) maxRulesFor(nsLabels map[string]string) int {
 	policy, ok := enforce.SelectPolicy(w.enforcement, nsLabels)
 	if !ok {
 		return 0
