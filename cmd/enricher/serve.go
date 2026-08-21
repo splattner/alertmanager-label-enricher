@@ -154,8 +154,13 @@ func (s *server) buildGeneration(ctx context.Context) (*generation, context.Canc
 		// watcher belonging to a superseded generation can never recompile
 		// against a newer one's sources. compileAndSwap drops the result if
 		// gen is no longer live.
+		declaredSources := make([]string, 0, len(cfg.Sources))
+		for _, src := range cfg.Sources {
+			declaredSources = append(declaredSources, src.Name)
+		}
 		gen.watcher = crd.New(kubeClient, crd.Config{
-			Enforcement: cfg.Enforcement,
+			Enforcement:     cfg.Enforcement,
+			DeclaredSources: declaredSources,
 			Logf: func(format string, args ...any) {
 				s.log.Info(fmt.Sprintf(format, args...))
 			},

@@ -324,3 +324,65 @@ func TestSupersededGenerationCannotPublish(t *testing.T) {
 		t.Error("a superseded generation republished its engine over the live one")
 	}
 }
+
+// ALE-05. A CR whose jq engine.Compile would reject used to fail the whole
+// compile: on the startup path that propagated out of runServe and the
+// process never booted, so any namespace able to create an EnrichmentRule
+// could keep the enricher down. It must now be rejected individually,
+// leaving every other tenant's rules working.
+func TestMalformedCRDoesNotBlockStartup(t *testing.T) {
+	var received []byte
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer target.Close()
+
+	client := newFakeDynamicClient(
+		namespaceObj("attacker"),
+		namespaceObj("victim"),
+		// Schema-valid, but the jq neither parses nor compiles.
+		enrichmentRuleObj("attacker", "poison", map[string]any{
+			"actions": []any{map[string]any{"set": map[string]any{
+				"label": "x",
+				"from":  map[string]any{"source": "nope", "jq": "..[[["},
+			}}},
+		}),
+		enrichmentRuleObj("victim", "add-note", setAnnotationSpec("note", "hello")),
+	)
+
+	s := newServer(writeCRDConfig(t, target.URL), discardLogger())
+	s.kubeClient = func() (dynamic.Interface, error) { return client, nil }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := s.applyConfig(ctx); err != nil {
+		t.Fatalf("startup failed because of one malformed tenant CR: %v", err)
+	}
+
+	// The innocent tenant's rule must still be compiled and working.
+	postBatch(t, s)
+	var got []map[string]any
+	if err := json.Unmarshal(received, &got); err != nil {
+		t.Fatalf("target received invalid JSON: %v (%s)", err, received)
+	}
+	annotations, _ := got[0]["annotations"].(map[string]any)
+	if annotations["note"] != "hello" {
+		t.Errorf("the valid tenant's rule did not apply: %v", got[0])
+	}
+
+	// And the poison CR must be reported to its own author, not silently lost.
+	cr, err := client.Resource(crd.GVR).Namespace("attacker").Get(ctx, "poison", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get poison CR: %v", err)
+	}
+	conditions, found, err := unstructured.NestedSlice(cr.Object, "status", "conditions")
+	if err != nil || !found || len(conditions) != 1 {
+		t.Fatalf("status.conditions = %+v (found=%v, err=%v), want one condition explaining the rejection", conditions, found, err)
+	}
+	cond, _ := conditions[0].(map[string]any)
+	if cond["status"] != "False" || cond["reason"] != "PolicyViolation" {
+		t.Errorf("condition = %+v, want the rejection reported as False/PolicyViolation", cond)
+	}
+}

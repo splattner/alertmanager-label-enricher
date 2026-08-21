@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
@@ -489,5 +490,133 @@ func TestApplyRequiredFailureNamesAnnotation(t *testing.T) {
 	}
 	if reqFail.Kind != "annotation" || reqFail.Target != "runbook_url" {
 		t.Fatalf("RequiredFailure = %+v", reqFail)
+	}
+}
+
+// config.ValidateRule is what decides whether a CR-sourced rule is allowed
+// into the engine, and engine.Compile is what actually builds it. If the
+// two ever disagree, a tenant rule can pass validation and then fail the
+// compile - which fails the whole recompile, for every tenant. They share
+// their regex and jq compilation (config.MatchRegex, extract.Compile)
+// precisely so that cannot happen; this pins the invariant.
+func TestAnythingValidateRuleAcceptsAlsoCompiles(t *testing.T) {
+	sources := map[string]bool{"s": true}
+
+	rules := []config.RuleConfig{
+		{Name: "plain", Actions: []config.ActionConfig{{Set: &config.SetAction{Label: "a", Value: "v"}}}},
+		{Name: "tmpl", Actions: []config.ActionConfig{{Set: &config.SetAction{Label: "a", Template: "{{ .Labels.ns }}"}}}},
+		{Name: "jq", Actions: []config.ActionConfig{{Set: &config.SetAction{Label: "a", From: &config.FromConfig{Source: "s", Jq: ".metadata.labels.team"}}}}},
+		{Name: "jq-vars", Actions: []config.ActionConfig{{Set: &config.SetAction{Label: "a", From: &config.FromConfig{Source: "s", Jq: `.[$labels.namespace] // $annotations.summary`}}}}},
+		{Name: "jq-regex", Actions: []config.ActionConfig{{Set: &config.SetAction{Label: "a", From: &config.FromConfig{Source: "s", Jq: ".x", Regex: `^team-(.+)$`}}}}},
+		{Name: "jq-fancy", Actions: []config.ActionConfig{{Set: &config.SetAction{Label: "a", From: &config.FromConfig{Source: "s", Jq: `[.items[]? | select(.ready) | .name] | join(",")`}}}}},
+		{
+			Name: "regex-matchers",
+			Match: []config.MatchConfig{
+				{Label: "ns", Op: config.OpRegex, Value: "prod-.*"},
+				{Label: "job", Op: config.OpNotRegex, Value: "(a|b)+"},
+			},
+			Actions: []config.ActionConfig{{Drop: &config.DropAction{Label: "noisy"}}},
+		},
+		{Name: "annotation", Actions: []config.ActionConfig{{Set: &config.SetAction{Annotation: "runbook", Value: "https://x"}}}},
+		// Rejected by validation - listed to prove the table exercises both
+		// outcomes rather than only ever hitting the accept path.
+		{Name: "bad-jq", Actions: []config.ActionConfig{{Set: &config.SetAction{Label: "a", From: &config.FromConfig{Source: "s", Jq: "..[[["}}}}},
+		{Name: "uncompilable-jq", Actions: []config.ActionConfig{{Set: &config.SetAction{Label: "a", From: &config.FromConfig{Source: "s", Jq: ".x | no_such_function"}}}}},
+		{Name: "bad-regex", Match: []config.MatchConfig{{Label: "ns", Op: config.OpRegex, Value: "prod-("}}, Actions: []config.ActionConfig{{Set: &config.SetAction{Label: "a", Value: "v"}}}},
+	}
+
+	accepted, rejected := 0, 0
+	for _, r := range rules {
+		validErr := config.ValidateRule(r, sources)
+		_, compileErr := Compile(&config.Config{Rules: []config.RuleConfig{r}}, fakeRegistry{}, extract.NewCache())
+
+		switch {
+		case validErr == nil && compileErr != nil:
+			t.Errorf("rule %q passed ValidateRule but failed to compile: %v\n"+
+				"validation and compilation have drifted apart - a tenant rule like this would break the recompile for everyone", r.Name, compileErr)
+		case validErr != nil && compileErr == nil:
+			// Safe direction (validation is stricter), but worth knowing.
+			t.Logf("note: rule %q is rejected by validation yet would compile: %v", r.Name, validErr)
+			rejected++
+		case validErr == nil:
+			accepted++
+		default:
+			rejected++
+		}
+	}
+
+	if accepted == 0 || rejected == 0 {
+		t.Fatalf("table exercised only one outcome (accepted=%d rejected=%d); it must cover both", accepted, rejected)
+	}
+}
+
+// ALE-02. gojq only observes cancellation when it is handed a context.
+// Without one, a pathological expression runs to completion regardless of
+// enrichment.timeout, pinning a core and never releasing its concurrency
+// slot - and jq from an EnrichmentRule CR is tenant-supplied.
+func TestPathologicalJqIsBoundedByContext(t *testing.T) {
+	cfg := &config.Config{Rules: []config.RuleConfig{{
+		Name: "expensive",
+		Actions: []config.ActionConfig{{Set: &config.SetAction{
+			Label: "x",
+			From:  &config.FromConfig{Source: "s", Jq: `reduce range(200000000) as $i (0; .+$i)`},
+		}}},
+	}}}
+	eng, err := Compile(cfg, fakeRegistry{"s": &fakeSource{value: map[string]any{}}}, extract.NewCache())
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+
+	done := make(chan struct{})
+	start := time.Now()
+	go func() {
+		defer close(done)
+		_, _ = eng.Apply(ctx, newAlert(map[string]string{"alertname": "T"}))
+	}()
+
+	select {
+	case <-done:
+		if elapsed := time.Since(start); elapsed > 5*time.Second {
+			t.Errorf("Apply took %v for a 300ms deadline; jq is not being interrupted promptly", elapsed)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("Apply never returned: enrichment.timeout does not bound jq evaluation, so this goroutine and its concurrency slot are leaked for the lifetime of the process")
+	}
+}
+
+// A rule that is not required must fail open when its jq is cut short:
+// the alert still goes out, just without that label.
+func TestCancelledJqFailsOpenForNonRequiredRule(t *testing.T) {
+	cfg := &config.Config{Rules: []config.RuleConfig{{
+		Name: "expensive",
+		Actions: []config.ActionConfig{{Set: &config.SetAction{
+			Label: "x",
+			From:  &config.FromConfig{Source: "s", Jq: `reduce range(200000000) as $i (0; .+$i)`},
+		}}},
+	}}}
+	eng, err := Compile(cfg, fakeRegistry{"s": &fakeSource{value: map[string]any{}}}, extract.NewCache())
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	a := newAlert(map[string]string{"alertname": "T"})
+	if _, err := eng.Apply(ctx, a); err != nil {
+		t.Fatalf("Apply returned an error for a non-required rule, want fail-open: %v", err)
+	}
+	labels, err := a.Labels()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := labels["x"]; exists {
+		t.Error("label x was set despite the jq being cut short")
+	}
+	if labels["alertname"] != "T" {
+		t.Error("the alert's own labels must survive intact")
 	}
 }

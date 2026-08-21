@@ -77,7 +77,10 @@ func TestValidateRejectsUndeclaredSourceReference(t *testing.T) {
 func TestValidateRejectsInvalidJq(t *testing.T) {
 	cfg := validConfig()
 	cfg.Rules[0].Actions[0].Set.From.Jq = "not valid jq {{{"
-	assertRejects(t, cfg, "invalid jq")
+	// The message comes from extract.Compile, the same function the
+	// engine's query cache uses - assert on the offending expression
+	// rather than on wording owned by another package.
+	assertRejects(t, cfg, "not valid jq {{{")
 }
 
 func TestValidateRejectsInvalidRegexMatcher(t *testing.T) {

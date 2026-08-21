@@ -3,6 +3,7 @@
 package extract
 
 import (
+	"context"
 	"fmt"
 	"regexp"
 	"sync"
@@ -50,8 +51,15 @@ func Compile(jqSrc, regexSrc string) (*Query, error) {
 // $labels/$annotations. It returns ok=false when the query yields no value,
 // null, or an empty string after the regex step — the caller decides
 // whether that means "apply the default" or "fail".
-func (q *Query) Run(input any, labels, annotations map[string]string) (value string, ok bool, err error) {
-	iter := q.code.Run(input, toAny(labels), toAny(annotations))
+//
+// ctx bounds evaluation. gojq only observes cancellation when it is given a
+// context, so without this a pathological expression (a large reduce, a
+// deep recursion) would run to completion no matter what enrichment.timeout
+// says, pinning a core and leaking its concurrency slot for the lifetime of
+// the process. That matters most for jq supplied through an EnrichmentRule
+// CR, which is tenant-controlled.
+func (q *Query) Run(ctx context.Context, input any, labels, annotations map[string]string) (value string, ok bool, err error) {
+	iter := q.code.RunWithContext(ctx, input, toAny(labels), toAny(annotations))
 
 	v, hasResult := iter.Next()
 	if !hasResult {

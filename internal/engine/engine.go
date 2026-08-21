@@ -87,7 +87,7 @@ func Compile(cfg *config.Config, sources Sources, queries *extract.Cache) (*Engi
 		for _, m := range r.Match {
 			cm := compiledMatch{label: m.Label, op: m.Op, value: m.Value}
 			if m.Op == config.OpRegex || m.Op == config.OpNotRegex {
-				re, err := regexp.Compile("^(?:" + m.Value + ")$")
+				re, err := config.MatchRegex(m.Value)
 				if err != nil {
 					return nil, fmt.Errorf("rule %q: %w", r.Name, err)
 				}
@@ -248,7 +248,7 @@ func (e *Engine) resolveValue(ctx context.Context, set compiledSet, labels, anno
 			return "", false, err
 		}
 
-		value, found, err := set.query.Run(result, labels, annotations)
+		value, found, err := set.query.Run(ctx, result, labels, annotations)
 		if err != nil {
 			if spec.Default != "" {
 				return spec.Default, true, nil

@@ -5,7 +5,6 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/itchyny/gojq"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/splattner/alertmanager-label-enricher/internal/extract"
@@ -135,6 +134,15 @@ func ValidateRule(r RuleConfig, sourceNames map[string]bool) error {
 	return nil
 }
 
+// MatchRegex compiles a matcher's regex the way the engine will: fully
+// anchored, matching Prometheus's own matcher semantics. Exported so
+// validation and engine.Compile share one implementation - if they ever
+// diverged, a rule could validate cleanly and then fail to compile, which
+// for a CR-sourced rule means a tenant's mistake breaking the reload.
+func MatchRegex(value string) (*regexp.Regexp, error) {
+	return regexp.Compile("^(?:" + value + ")$")
+}
+
 func validateMatch(m MatchConfig) error {
 	if m.Label == "" {
 		return fmt.Errorf("label is required")
@@ -142,7 +150,7 @@ func validateMatch(m MatchConfig) error {
 	switch m.Op {
 	case OpExists, OpAbsent, OpEq, OpNe:
 	case OpRegex, OpNotRegex:
-		if _, err := regexp.Compile("^(?:" + m.Value + ")$"); err != nil {
+		if _, err := MatchRegex(m.Value); err != nil {
 			return fmt.Errorf("invalid regex %q: %w", m.Value, err)
 		}
 	default:
@@ -245,22 +253,15 @@ func validateSet(s *SetAction, sourceNames map[string]bool) error {
 		if s.From.Jq == "" {
 			return fmt.Errorf("set.%s %q: from.jq is required", kind, name)
 		}
-		// Parse then Compile: parsing alone accepts expressions that fail
-		// to compile (an undefined function, an unbound variable), which
-		// would otherwise pass `enricher check` and only surface when
-		// engine.Compile runs - i.e. during a reload, where the failure
-		// costs a configuration swap rather than a validation error.
-		query, err := gojq.Parse(s.From.Jq)
-		if err != nil {
-			return fmt.Errorf("set.%s %q: invalid jq %q: %w", kind, name, s.From.Jq, err)
-		}
-		if _, err := gojq.Compile(query, gojq.WithVariables(extract.VarNames)); err != nil {
-			return fmt.Errorf("set.%s %q: invalid jq %q: %w", kind, name, s.From.Jq, err)
-		}
-		if s.From.Regex != "" {
-			if _, err := regexp.Compile(s.From.Regex); err != nil {
-				return fmt.Errorf("set.%s %q: invalid regex %q: %w", kind, name, s.From.Regex, err)
-			}
+		// Compile through the same function the engine's query cache uses,
+		// rather than reimplementing it: parsing alone accepts expressions
+		// that fail to compile (an undefined function, an unbound
+		// variable), and any drift between the two would let a rule
+		// validate cleanly and then fail engine.Compile - which for a
+		// CR-sourced rule means a tenant's mistake breaking the reload for
+		// everyone.
+		if _, err := extract.Compile(s.From.Jq, s.From.Regex); err != nil {
+			return fmt.Errorf("set.%s %q: %w", kind, name, err)
 		}
 	}
 	if strings.TrimSpace(name) != name {

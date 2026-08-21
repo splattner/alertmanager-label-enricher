@@ -25,7 +25,7 @@ func TestEnforcedRulesFromDifferentNamespacesStayIsolated(t *testing.T) {
 		Name:    "mark-team",
 		Actions: []config.ActionConfig{{Set: &config.SetAction{Label: "team", Value: "team-a"}}},
 	}
-	enforcedA, err := enforce.Rule(ruleA, "team-a-namespace", nil, enforcement)
+	enforcedA, err := enforce.Rule(ruleA, "team-a-namespace", nil, nil, enforcement)
 	if err != nil {
 		t.Fatalf("enforce.Rule for team A: %v", err)
 	}
@@ -37,7 +37,7 @@ func TestEnforcedRulesFromDifferentNamespacesStayIsolated(t *testing.T) {
 		Name:    "mark-team",
 		Actions: []config.ActionConfig{{Set: &config.SetAction{Label: "team", Value: "team-b", Overwrite: true}}},
 	}
-	enforcedB, err := enforce.Rule(ruleB, "team-b-namespace", nil, enforcement)
+	enforcedB, err := enforce.Rule(ruleB, "team-b-namespace", nil, nil, enforcement)
 	if err != nil {
 		t.Fatalf("enforce.Rule for team B: %v", err)
 	}
@@ -84,7 +84,7 @@ func TestEnforcedRuleClaimingAnotherNamespaceMatchesNothing(t *testing.T) {
 			Annotation: "pwned", Value: "true",
 		}}},
 	}
-	enforced, err := enforce.Rule(rule, "attacker-namespace", nil, enforcement)
+	enforced, err := enforce.Rule(rule, "attacker-namespace", nil, nil, enforcement)
 	if err != nil {
 		t.Fatalf("enforce.Rule: %v", err)
 	}

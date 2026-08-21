@@ -1,6 +1,9 @@
 package extract
 
-import "testing"
+import (
+	"context"
+	"testing"
+)
 
 func TestQueryRun(t *testing.T) {
 	tests := []struct {
@@ -71,7 +74,7 @@ func TestQueryRun(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Compile: %v", err)
 			}
-			value, ok, err := q.Run(tt.input, tt.labels, tt.annotations)
+			value, ok, err := q.Run(context.Background(), tt.input, tt.labels, tt.annotations)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("Run error = %v, wantErr %v", err, tt.wantErr)
 			}

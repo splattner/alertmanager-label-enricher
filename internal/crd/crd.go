@@ -57,6 +57,11 @@ const defaultSyncTimeout = 60 * time.Second
 // Config configures a Watcher.
 type Config struct {
 	Enforcement config.EnforcementConfig
+	// DeclaredSources names the sources the file config declares. A
+	// CR-sourced rule referencing anything else is rejected: enforcement
+	// decides which of these a namespace may *use*, but a rule naming a
+	// source that does not exist at all is simply malformed.
+	DeclaredSources []string
 	// Debounce defaults to 1s if zero.
 	Debounce time.Duration
 	// SyncTimeout bounds how long Start waits for the initial list of
@@ -77,12 +82,13 @@ type Config struct {
 // clientset - see internal/source/kubernetes for the same pattern), and
 // produces the resulting enforced rule list on demand.
 type Watcher struct {
-	client      dynamic.Interface
-	enforcement config.EnforcementConfig
-	debounce    time.Duration
-	syncTimeout time.Duration
-	onChange    func()
-	logf        func(format string, args ...any)
+	client          dynamic.Interface
+	enforcement     config.EnforcementConfig
+	declaredSources map[string]bool
+	debounce        time.Duration
+	syncTimeout     time.Duration
+	onChange        func()
+	logf            func(format string, args ...any)
 
 	ruleInformer cache.SharedIndexInformer
 	ruleLister   cache.GenericLister
@@ -120,18 +126,24 @@ func New(client dynamic.Interface, cfg Config) *Watcher {
 	ruleInformer := factory.ForResource(GVR)
 	nsInformer := factory.ForResource(namespaceGVR)
 
+	declaredSources := make(map[string]bool, len(cfg.DeclaredSources))
+	for _, name := range cfg.DeclaredSources {
+		declaredSources[name] = true
+	}
+
 	return &Watcher{
-		client:         client,
-		enforcement:    cfg.Enforcement,
-		debounce:       debounce,
-		syncTimeout:    syncTimeout,
-		onChange:       onChange,
-		logf:           logf,
-		ruleInformer:   ruleInformer.Informer(),
-		ruleLister:     ruleInformer.Lister(),
-		nsInformer:     nsInformer.Informer(),
-		nsLister:       nsInformer.Lister(),
-		seenNamespaces: map[string]bool{},
+		client:          client,
+		enforcement:     cfg.Enforcement,
+		declaredSources: declaredSources,
+		debounce:        debounce,
+		syncTimeout:     syncTimeout,
+		onChange:        onChange,
+		logf:            logf,
+		ruleInformer:    ruleInformer.Informer(),
+		ruleLister:      ruleInformer.Lister(),
+		nsInformer:      nsInformer.Informer(),
+		nsLister:        nsInformer.Lister(),
+		seenNamespaces:  map[string]bool{},
 	}
 }
 
@@ -302,7 +314,7 @@ func (w *Watcher) evaluate() ([]config.RuleConfig, []decision) {
 
 		r := c.spec.RuleConfig
 		r.Name = c.name
-		enforced, err := enforce.Rule(r, c.ns, nsLabels, w.enforcement)
+		enforced, err := enforce.Rule(r, c.ns, nsLabels, w.declaredSources, w.enforcement)
 		if err != nil {
 			msg := err.Error()
 			w.recordRejected(c.ns, "policy_violation")
