@@ -116,6 +116,12 @@ var (
 		Name:      "crd_rules_rejected_total",
 		Help:      "EnrichmentRule CRs rejected, by namespace and reason.",
 	}, []string{"namespace", "reason"}) // decode_error | namespace_unreadable | policy_violation
+
+	CRDStatusUpdatesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "crd_status_updates_total",
+		Help:      "EnrichmentRule status.conditions writes attempted, by result. No leader election guards these across replicas, so a nonzero conflict rate is expected and benign - it's resolved by the next reconcile.",
+	}, []string{"result"}) // ok | conflict | error
 )
 
 // Registry returns a registry with all enricher metrics registered.
@@ -140,6 +146,7 @@ func Registry() *prometheus.Registry {
 		ConfigReloadSuccessTimestamp,
 		CRDRules,
 		CRDRulesRejectedTotal,
+		CRDStatusUpdatesTotal,
 	)
 	return reg
 }

@@ -10,7 +10,9 @@ rules:
   {{- if .Values.crd.enabled }}
   {{- $rules = concat $rules (list
         (dict "apiGroups" (list "enricher.splattner.github.io") "resources" (list "enrichmentrules") "verbs" (list "get" "list" "watch"))
+        (dict "apiGroups" (list "enricher.splattner.github.io") "resources" (list "enrichmentrules/status") "verbs" (list "get" "update" "patch"))
         (dict "apiGroups" (list "") "resources" (list "namespaces") "verbs" (list "get" "list" "watch"))
+        (dict "apiGroups" (list "") "resources" (list "events") "verbs" (list "create"))
       ) }}
   {{- end }}
   {{- toYaml $rules | nindent 2 }}

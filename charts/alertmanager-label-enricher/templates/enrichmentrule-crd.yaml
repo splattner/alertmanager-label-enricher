@@ -24,6 +24,12 @@ spec:
       subresources:
         status: {}
       additionalPrinterColumns:
+        - name: Ready
+          type: string
+          jsonPath: .status.conditions[?(@.type=="Ready")].status
+        - name: Reason
+          type: string
+          jsonPath: .status.conditions[?(@.type=="Ready")].reason
         - name: Required
           type: boolean
           jsonPath: .spec.required
@@ -128,4 +134,37 @@ spec:
                             type: string
                           force:
                             type: boolean
+            status:
+              type: object
+              description: >-
+                Set by the enricher, never by the tenant. `conditions`
+                mirrors the Kubernetes convention (type/status/reason/
+                message/lastTransitionTime): a single `Ready` condition
+                reports whether this rule is currently compiled into the
+                engine, and why not if it isn't. No leader election
+                guards these writes across enricher replicas, so this is
+                eventually consistent, not exclusive - see
+                docs/configuration.md.
+              properties:
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    required: [type, status, reason, lastTransitionTime]
+                    properties:
+                      type:
+                        type: string
+                      status:
+                        type: string
+                        enum: ["True", "False", "Unknown"]
+                      reason:
+                        type: string
+                      message:
+                        type: string
+                      observedGeneration:
+                        type: integer
+                        format: int64
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
 {{- end }}

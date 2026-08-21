@@ -398,6 +398,7 @@ Served at `/metrics`, all under the `ale_` prefix:
 | `ale_config_reload_success_timestamp_seconds` | — | unix time of the last successful reload |
 | `ale_crd_rules` | `namespace`, `state` (`accepted`\|`rejected`) | `EnrichmentRule` CRs currently known, by namespace |
 | `ale_crd_rules_rejected_total` | `namespace`, `reason` (`decode_error`\|`namespace_unreadable`\|`policy_violation`\|`max_rules_exceeded`) | a CR rejected, cumulative |
+| `ale_crd_status_updates_total` | `result` (`ok`\|`conflict`\|`error`) | a `status.conditions` write attempt on an `EnrichmentRule` CR. No leader election guards these across replicas, so a nonzero `conflict` rate is expected and benign - see [Rejected rules](#rejected-rules) |
 
 `ale_labels_overwritten_total`/`ale_labels_dropped_total` exist specifically
 to make the fingerprint-changing blast radius from [`overwrite`](#actions)
@@ -534,7 +535,51 @@ if a specific deployment wants to.
 A CR that fails to decode, whose namespace can't be read, or that
 enforcement rejects is skipped - logged and counted via
 `ale_crd_rules_rejected_total{namespace,reason}` - rather than blocking
-compilation of every other rule, from any namespace. As of this version
-that's the only feedback a tenant gets; there's no `status` condition or
-Kubernetes Event on the CR itself yet showing *why* it didn't take (a
-planned follow-up). Check the enricher's logs or that metric.
+compilation of every other rule, from any namespace. A tenant sees this
+directly on their own CR, without needing cluster-wide access or the
+enricher's own logs:
+
+```console
+$ kubectl get enrichmentrule -n payments
+NAME      READY   REASON            REQUIRED   AGE
+runbook   False   PolicyViolation   false      3m12s
+
+$ kubectl describe enrichmentrule runbook -n payments
+...
+Status:
+  Conditions:
+    Type:                 Ready
+    Status:               False
+    Reason:               PolicyViolation
+    Message:              rule "runbook": actions[0]: set label "severity": denied by policy
+    Observed Generation:  2
+    Last Transition Time: 2026-08-21T09:14:03Z
+Events:
+  Type     Reason            Age   From                        Message
+  ----     ------            ----  ----                        -------
+  Warning  PolicyViolation   3m    alertmanager-label-enricher  rule "runbook": actions[0]: set label "severity": denied by policy
+```
+
+`status.conditions[type=Ready]` and the `Ready`/`Reason` columns above
+come from `kubectl`'s CRD printer columns, driven off the same condition;
+a successfully compiled rule shows `Status: True`, `Reason: Compiled`.
+Seeing either needs `get` on `enrichmentrules` in your own namespace -
+already required to create the CR in the first place - and `create` on
+`events` is granted to the enricher's own ServiceAccount by `crd.enabled`
+in the chart, not to tenants.
+
+**No leader election.** Every enricher replica evaluates and writes this
+status independently - there's deliberately no
+`k8s.io/client-go/tools/leaderelection` here, since the standard
+`resourcelock.LeaseLock` needs a typed `coordinationv1` client and this
+project is dynamic-client-only everywhere else. That trade-off is made
+safe rather than exclusive: a status write only happens when the
+condition actually changed, and a `Conflict` from a replica that just
+wrote the same thing is dropped, not retried - the next debounced
+reconcile (which every replica runs on every CR/Namespace change)
+converges regardless. The one visible cost is Events: they use
+`metadata.generateName` rather than a dedup key, so a multi-replica race
+on the same transition can produce a couple of duplicate Event objects.
+`ale_crd_status_updates_total{result="conflict"}` is expected to be
+nonzero with more than one replica; it climbing relative to `result="ok"`
+is the signal that's worth watching, not the raw count.
