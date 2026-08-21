@@ -392,3 +392,13 @@ func TestParseStillAcceptsAValidConfig(t *testing.T) {
 		t.Fatalf("Parse rejected a valid config under strict decoding: %v", err)
 	}
 }
+
+// CR-sourced rules compile to "<namespace>/<name>". A file rule named the
+// same thing would share a metric series with a tenant's rule, so the
+// separator is reserved rather than the collision being detected later
+// (ALE-16).
+func TestValidateRejectsSlashInFileRuleName(t *testing.T) {
+	cfg := validConfig()
+	cfg.Rules[0].Name = "payments/team-from-namespace"
+	assertRejects(t, cfg, "reserved for CR-sourced rules")
+}

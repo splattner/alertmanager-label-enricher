@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -160,5 +161,149 @@ func TestLookupTemplatesURLFromLabels(t *testing.T) {
 	}
 	if gotPath != "/service/checkout" {
 		t.Fatalf("requested path = %q, want /service/checkout", gotPath)
+	}
+}
+
+// ALE-08. singleflight hands the leader's context to everyone who joins
+// the flight. When the leader went away - its client disconnected, its
+// enrichment deadline passed - the shared fetch was cancelled out from
+// under healthy waiters, and the resulting error was then cached under
+// negativeTTL, turning one abandoned request into a source-wide outage for
+// the full TTL (30s by default).
+func TestCancelledCallerDoesNotPoisonOthersOrTheCache(t *testing.T) {
+	release := make(chan struct{})
+	var hits int32
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		<-release
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"team":"payments"}`))
+	}))
+	defer backend.Close()
+
+	s, err := New("cmdb", Config{
+		Method: "GET", URL: backend.URL, AllowedHosts: []string{"127.0.0.1"},
+		Timeout: 10 * time.Second, MaxResponseBytes: 1 << 20,
+		TTL: 10 * time.Minute, NegativeTTL: 30 * time.Second, MaxEntries: 100,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctxA, cancelA := context.WithCancel(context.Background())
+
+	var wg sync.WaitGroup
+	var errA, errB error
+	var valB any
+
+	wg.Add(1)
+	go func() { defer wg.Done(); _, errA = s.Lookup(ctxA, source.LookupInput{}) }()
+	waitForHits(t, &hits, 1) // A is the singleflight leader
+
+	wg.Add(1)
+	go func() { defer wg.Done(); valB, errB = s.Lookup(context.Background(), source.LookupInput{}) }()
+	time.Sleep(100 * time.Millisecond) // let B join A's flight
+
+	cancelA()      // A's caller goes away
+	close(release) // the backend would have answered fine
+	wg.Wait()
+
+	// A asked for something it can no longer use, and is told so.
+	if errA == nil {
+		t.Error("the cancelled caller should see its own cancellation")
+	}
+	// B's context was never cancelled, so B must get the real answer.
+	if errB != nil {
+		t.Fatalf("a healthy waiter was poisoned by another caller's cancellation: %v", errB)
+	}
+	m, _ := valB.(map[string]any)
+	if m["team"] != "payments" {
+		t.Fatalf("healthy waiter got %v, want the fetched value", valB)
+	}
+
+	// And nothing negative was cached: the next lookup is served, not failed.
+	v, err := s.Lookup(context.Background(), source.LookupInput{})
+	if err != nil {
+		t.Fatalf("a later lookup failed, so the cancellation was cached: %v", err)
+	}
+	if m, _ := v.(map[string]any); m["team"] != "payments" {
+		t.Fatalf("later lookup got %v, want the cached value", v)
+	}
+	if got := atomic.LoadInt32(&hits); got != 1 {
+		t.Errorf("backend was hit %d times, want 1 - the result should have been cached and shared", got)
+	}
+}
+
+func waitForHits(t *testing.T, hits *int32, want int32) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for atomic.LoadInt32(hits) < want {
+		if time.Now().After(deadline) {
+			t.Fatalf("backend saw %d requests, want %d", atomic.LoadInt32(hits), want)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// A genuine upstream failure must still be cached under negativeTTL - the
+// fix must not disable negative caching wholesale.
+func TestUpstreamFailureIsStillNegativelyCached(t *testing.T) {
+	var hits int32
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer backend.Close()
+
+	s, err := New("cmdb", Config{
+		Method: "GET", URL: backend.URL, AllowedHosts: []string{"127.0.0.1"},
+		Timeout: 5 * time.Second, MaxResponseBytes: 1 << 20,
+		TTL: 10 * time.Minute, NegativeTTL: 30 * time.Second, MaxEntries: 100,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 0; i < 3; i++ {
+		if _, err := s.Lookup(context.Background(), source.LookupInput{}); err == nil {
+			t.Fatal("expected the upstream 500 to surface as an error")
+		}
+	}
+	if got := atomic.LoadInt32(&hits); got != 1 {
+		t.Errorf("backend was hit %d times, want 1 - a real upstream failure must still be negatively cached", got)
+	}
+}
+
+// At capacity, expired entries are dead weight already treated as misses,
+// so they should go before any live entry is discarded (ALE-17).
+func TestCacheEvictsExpiredEntriesBeforeLiveOnes(t *testing.T) {
+	s, err := New("cmdb", Config{
+		Method: "GET", URL: "http://example.invalid", AllowedHosts: []string{"example.invalid"},
+		Timeout: time.Second, MaxResponseBytes: 1 << 20,
+		TTL: time.Minute, NegativeTTL: time.Minute, MaxEntries: 3,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Two already-expired entries and one live one, at capacity.
+	past := time.Now().Add(-time.Hour)
+	s.cache["stale-1"] = cacheEntry{value: "old", expiresAt: past}
+	s.cache["stale-2"] = cacheEntry{value: "old", expiresAt: past}
+	s.cache["hot"] = cacheEntry{value: "keep-me", expiresAt: time.Now().Add(time.Hour)}
+
+	s.cacheSet("new", "fresh", nil)
+
+	if _, ok := s.cache["hot"]; !ok {
+		t.Error("a live entry was evicted while expired entries were available to reclaim")
+	}
+	if _, ok := s.cache["stale-1"]; ok {
+		t.Error("an expired entry survived eviction")
+	}
+	if _, ok := s.cache["stale-2"]; ok {
+		t.Error("an expired entry survived eviction")
+	}
+	if _, ok := s.cache["new"]; !ok {
+		t.Error("the new entry was not stored")
 	}
 }

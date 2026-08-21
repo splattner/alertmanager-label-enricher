@@ -6,6 +6,7 @@ import (
 
 	"github.com/splattner/alertmanager-label-enricher/internal/config"
 	"github.com/splattner/alertmanager-label-enricher/internal/enforce"
+	"github.com/splattner/alertmanager-label-enricher/internal/extract"
 )
 
 // TestEnforcedRulesFromDifferentNamespacesStayIsolated is the end-to-end
@@ -46,7 +47,7 @@ func TestEnforcedRulesFromDifferentNamespacesStayIsolated(t *testing.T) {
 		Targets: []config.TargetConfig{{URL: "http://x"}},
 		Rules:   []config.RuleConfig{enforcedA, enforcedB},
 	}
-	eng := compile(t, cfg, fakeRegistry{})
+	eng := compileEnforced(t, cfg, fakeRegistry{})
 
 	teamAAlert := newAlert(map[string]string{"alertname": "Test", "namespace": "team-a-namespace"})
 	if _, err := eng.Apply(context.Background(), teamAAlert); err != nil {
@@ -93,7 +94,7 @@ func TestEnforcedRuleClaimingAnotherNamespaceMatchesNothing(t *testing.T) {
 		Targets: []config.TargetConfig{{URL: "http://x"}},
 		Rules:   []config.RuleConfig{enforced},
 	}
-	eng := compile(t, cfg, fakeRegistry{})
+	eng := compileEnforced(t, cfg, fakeRegistry{})
 
 	victimAlert := newAlert(map[string]string{"alertname": "Test", "namespace": "victim-namespace"})
 	if _, err := eng.Apply(context.Background(), victimAlert); err != nil {
@@ -118,4 +119,19 @@ func TestEnforcedRuleClaimingAnotherNamespaceMatchesNothing(t *testing.T) {
 	if _, exists := annotations["pwned"]; exists {
 		t.Fatal("rule must not fire even against the attacker's own namespace, since its own explicit matcher (namespace=victim-namespace) contradicts the injected one (namespace=attacker-namespace) - both must be true, and can't be")
 	}
+}
+
+// compileEnforced mirrors what cmd/enricher does for a config whose rules
+// came from EnrichmentRule CRs: those were already validated individually
+// by enforce.Rule, and the merged set is handed straight to engine.Compile.
+// config.Validate is never run over merged rules in production - it governs
+// the file config, where "/" in a rule name is reserved precisely so that
+// CR-sourced "<namespace>/<name>" rules cannot collide with one.
+func compileEnforced(t *testing.T, cfg *config.Config, reg fakeRegistry) *Engine {
+	t.Helper()
+	eng, err := Compile(cfg, reg, extract.NewCache())
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	return eng
 }

@@ -70,10 +70,19 @@ type compiledSet struct {
 	tmpl  *template.Template // nil unless spec.Template != ""
 }
 
+// compiledAction is one entry of a rule's actions list, holding whichever
+// of set/drop it is. Keeping them in a single ordered slice - rather than
+// a separate list of sets alongside the raw spec - is what lets Apply run
+// actions in the order they were declared.
+type compiledAction struct {
+	drop *config.DropAction
+	set  *compiledSet // nil when this action is a drop
+}
+
 type compiledRule struct {
 	spec    config.RuleConfig
 	matches []compiledMatch
-	sets    []compiledSet
+	actions []compiledAction
 }
 
 // Engine holds the compiled rules ready to evaluate against alerts.
@@ -102,6 +111,10 @@ func Compile(cfg *config.Config, sources Sources, queries *extract.Cache) (*Engi
 		}
 
 		for _, a := range r.Actions {
+			if a.Drop != nil {
+				cr.actions = append(cr.actions, compiledAction{drop: a.Drop})
+				continue
+			}
 			if a.Set == nil {
 				continue
 			}
@@ -122,7 +135,7 @@ func Compile(cfg *config.Config, sources Sources, queries *extract.Cache) (*Engi
 				}
 				cs.query = q
 			}
-			cr.sets = append(cr.sets, cs)
+			cr.actions = append(cr.actions, compiledAction{set: &cs})
 		}
 
 		eng.rules = append(eng.rules, cr)
@@ -153,37 +166,14 @@ func (e *Engine) Apply(ctx context.Context, a alert.Alert) ([]Result, error) {
 
 		res := Result{Rule: rule.spec.Name, DryRun: rule.spec.DryRun}
 
-		for _, action := range rule.spec.Actions {
-			if action.Drop == nil {
+		for _, action := range rule.actions {
+			if action.drop != nil {
+				applyDrop(&res, rule, action.drop, labels, annotations)
 				continue
 			}
-			m, name, isAnnotation := target(labels, annotations, action.Drop.Label, action.Drop.Annotation)
-			if _, exists := m[name]; !exists {
-				continue
-			}
-			// An alert with no labels at all is rejected by Alertmanager -
-			// and it rejects the entire POST, so one such alert strands
-			// every other alert in the batch, including other tenants'.
-			// The last label is load-bearing: refuse to remove it and keep
-			// the alert deliverable rather than emitting one that poisons
-			// the batch it travels in.
-			if !isAnnotation && len(labels) == 1 {
-				res.DropsRefused = append(res.DropsRefused, name)
-				metrics.LabelDropsRefusedTotal.WithLabelValues(rule.spec.Name, name).Inc()
-				continue
-			}
-			if !rule.spec.DryRun {
-				delete(m, name)
-			}
-			if isAnnotation {
-				res.AnnotationsDropped = append(res.AnnotationsDropped, name)
-			} else {
-				res.Dropped = append(res.Dropped, name)
-			}
-		}
 
-		for _, set := range rule.sets {
-			value, ok, err := e.resolveValue(ctx, set, labels, annotations)
+			set := action.set
+			value, ok, err := e.resolveValue(ctx, *set, labels, annotations)
 			if err != nil || !ok {
 				if rule.spec.Required {
 					res.RequiredFailed = true
@@ -192,7 +182,15 @@ func (e *Engine) Apply(ctx context.Context, a alert.Alert) ([]Result, error) {
 					if set.spec.Annotation != "" {
 						kind, targetName = "annotation", set.spec.Annotation
 					}
-					return results, &RequiredFailure{Rule: rule.spec.Name, Kind: kind, Target: targetName, Reason: err}
+					// err is nil on a clean miss - the lookup worked, it
+					// just produced nothing. Reporting that as "<nil>"
+					// leaves whoever is paged by the resulting 503 with no
+					// idea what to fix.
+					reason := err
+					if reason == nil {
+						reason = noValueReason(set.spec)
+					}
+					return results, &RequiredFailure{Rule: rule.spec.Name, Kind: kind, Target: targetName, Reason: reason}
 				}
 				continue
 			}
@@ -221,6 +219,41 @@ func (e *Engine) Apply(ctx context.Context, a alert.Alert) ([]Result, error) {
 		results = append(results, res)
 	}
 	return results, nil
+}
+
+// applyDrop removes one label or annotation, unless it is the alert's last
+// label. Alertmanager rejects an alert with no labels at all - and rejects
+// the entire POST along with it, so one such alert strands every other
+// alert in the batch, including other tenants'. The last label is
+// load-bearing: keep it and record the refusal.
+func applyDrop(res *Result, rule compiledRule, drop *config.DropAction, labels, annotations map[string]string) {
+	m, name, isAnnotation := target(labels, annotations, drop.Label, drop.Annotation)
+	if _, exists := m[name]; !exists {
+		return
+	}
+	if !isAnnotation && len(labels) == 1 {
+		res.DropsRefused = append(res.DropsRefused, name)
+		metrics.LabelDropsRefusedTotal.WithLabelValues(rule.spec.Name, name).Inc()
+		return
+	}
+	if !rule.spec.DryRun {
+		delete(m, name)
+	}
+	if isAnnotation {
+		res.AnnotationsDropped = append(res.AnnotationsDropped, name)
+	} else {
+		res.Dropped = append(res.Dropped, name)
+	}
+}
+
+// noValueReason explains a clean miss - the lookup succeeded but yielded
+// nothing usable - in terms of what the operator would need to change.
+func noValueReason(spec config.SetAction) error {
+	if spec.From != nil {
+		return fmt.Errorf("source %q returned no value for jq %q, and no default is configured",
+			spec.From.Source, spec.From.Jq)
+	}
+	return fmt.Errorf("no value could be resolved, and no default is configured")
 }
 
 // target resolves which map (labels or annotations) a set/drop action

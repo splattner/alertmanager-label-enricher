@@ -96,6 +96,14 @@ func Validate(cfg *Config) error {
 		if ruleNames[r.Name] {
 			return fmt.Errorf("rules[%q]: duplicate rule name", r.Name)
 		}
+		// "/" is reserved: rules sourced from an EnrichmentRule CR compile
+		// to "<namespace>/<name>", so allowing it here would let a file
+		// rule silently share a name - and therefore a metric series - with
+		// a tenant's rule. Reserving the separator makes the collision
+		// impossible rather than something to detect after the fact.
+		if strings.Contains(r.Name, "/") {
+			return fmt.Errorf("rules[%q]: name must not contain %q, which is reserved for CR-sourced rules (\"<namespace>/<name>\")", r.Name, "/")
+		}
 		ruleNames[r.Name] = true
 
 		if err := ValidateRule(r, sourceNames); err != nil {

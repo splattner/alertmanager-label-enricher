@@ -5,6 +5,7 @@ package http
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -96,13 +97,31 @@ func (s *Source) Lookup(ctx context.Context, in source.LookupInput) (any, error)
 		return v, err
 	}
 
+	// The shared fetch runs on a context detached from any single caller's,
+	// bounded only by the source's own timeout. singleflight hands the
+	// leader's context to everyone who joins the flight, so inheriting it
+	// would let one caller going away - its client disconnecting, its
+	// enrichment deadline passing - abort a fetch that healthy waiters are
+	// still depending on. Values, not cancellation, are what should be
+	// shared here.
 	res, err, _ := s.group.Do(key, func() (any, error) {
-		v, ferr := s.fetch(ctx, target)
+		fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.cfg.Timeout)
+		defer cancel()
+
+		v, ferr := s.fetch(fetchCtx, target)
 		s.cacheSet(key, v, ferr)
 		return v, ferr
 	})
 	if err != nil {
 		return nil, err
+	}
+
+	// This caller's own context still governs what it gets back: if it
+	// expired while waiting on the shared fetch, report that rather than a
+	// result it is no longer entitled to act on. The fetched value is
+	// already cached for whoever asks next.
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, fmt.Errorf("http source %q: %w", s.name, ctxErr)
 	}
 	return res, nil
 }
@@ -181,20 +200,43 @@ func (s *Source) cacheGet(key string) (any, bool, error) {
 }
 
 func (s *Source) cacheSet(key string, v any, err error) {
+	// A cancelled or timed-out fetch says nothing about the upstream, so
+	// caching it under negativeTTL would turn one slow or abandoned request
+	// into a source-wide outage for the whole TTL. Only real answers - and
+	// real upstream failures - are worth remembering.
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return
+	}
+
 	ttl := s.cfg.TTL
 	if err != nil {
 		ttl = s.cfg.NegativeTTL
 	}
 
+	now := time.Now()
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.cfg.MaxEntries > 0 && len(s.cache) >= s.cfg.MaxEntries {
-		// Cheapest possible eviction under load: drop an arbitrary entry
-		// rather than track LRU order for a cache this size.
-		for k := range s.cache {
-			delete(s.cache, k)
-			break
+		// Reclaim expired entries first. They are dead weight - already
+		// treated as misses on read - so evicting them costs nothing,
+		// whereas evicting an arbitrary live entry may well discard a hot
+		// one and force a refetch. Only if everything is live do we fall
+		// back to dropping an arbitrary entry, which stays cheap by not
+		// tracking LRU order for a cache this size.
+		evicted := false
+		for k, e := range s.cache {
+			if now.After(e.expiresAt) {
+				delete(s.cache, k)
+				evicted = true
+			}
+		}
+		if !evicted {
+			for k := range s.cache {
+				delete(s.cache, k)
+				break
+			}
 		}
 	}
-	s.cache[key] = cacheEntry{value: v, err: err, expiresAt: time.Now().Add(ttl)}
+	s.cache[key] = cacheEntry{value: v, err: err, expiresAt: now.Add(ttl)}
 }
