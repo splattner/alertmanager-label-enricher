@@ -382,6 +382,8 @@ Served at `/metrics`, all under the `ale_` prefix:
 |---|---|---|
 | `ale_alerts_received_total` | — | alerts received from Prometheus, before enrichment |
 | `ale_alerts_forwarded_total` | `result` (`ok`\|`required_failed`\|`decode_error`\|`forward_failed`) | alert batches, by outcome |
+| `ale_alerts_dropped_total` | `reason` (`malformed`) | individual alerts dropped from an otherwise-forwarded batch — dropping one alert is deliberately preferred to rejecting the batch it arrived in |
+| `ale_enrichment_panics_total` | — | panics recovered while enriching one alert. **Always a bug**; the alert is forwarded un-enriched rather than taking the process down. Any nonzero value warrants investigation |
 | `ale_rule_evaluations_total` | `rule`, `result` (`matched`\|`skipped`\|`required_failed`) | one rule's evaluation against one alert |
 | `ale_labels_added_total` | `rule`, `label` | a label newly added |
 | `ale_labels_overwritten_total` | `rule`, `label` | an existing label replaced — fingerprint-changing |
@@ -421,9 +423,19 @@ on:
 - the config file changing on disk (fsnotify)
 - `POST /-/reload` against the enricher's own listener
 
-A failed reload (parse error, validation error, or a new Kubernetes
-source's informer failing to sync) logs the error and leaves the
-previously running config serving traffic — it never partially applies.
+A failed reload — parse error, validation error, a new Kubernetes source's
+informer failing to sync, or the engine failing to compile — logs the error
+and leaves the previously running config serving traffic. It never
+partially applies: the replacement generation is built *and* its engine
+fully compiled before any of it becomes visible, and the outgoing
+generation keeps running (informers included) until the new one is known
+good. A generation that fails at any stage is torn down completely.
+
+Initial informer sync is bounded (60s per source, and 60s for the
+`EnrichmentRule` watch). If a resource doesn't exist or the ServiceAccount
+can't list and watch it, startup fails with an error naming the resource
+and the likely cause, rather than blocking forever — an unbounded wait
+would leave the pod with no listener, no error and no crash.
 
 ## EnrichmentRule CRD and tenancy
 

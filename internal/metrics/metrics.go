@@ -117,6 +117,18 @@ var (
 		Help:      "EnrichmentRule CRs rejected, by namespace and reason.",
 	}, []string{"namespace", "reason"}) // decode_error | namespace_unreadable | policy_violation
 
+	AlertsDroppedTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "alerts_dropped_total",
+		Help:      "Individual alerts dropped from an otherwise-forwarded batch, by reason. Dropping one alert is deliberately preferred to rejecting the batch it arrived in.",
+	}, []string{"reason"}) // malformed
+
+	EnrichmentPanicsTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "enrichment_panics_total",
+		Help:      "Panics recovered while enriching a single alert. Always a bug - the alert is forwarded un-enriched rather than taking the process down. Any nonzero value warrants investigation.",
+	})
+
 	CRDStatusUpdatesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace,
 		Name:      "crd_status_updates_total",
@@ -144,6 +156,8 @@ func Registry() *prometheus.Registry {
 		ForwardRetriesTotal,
 		ConfigReloadsTotal,
 		ConfigReloadSuccessTimestamp,
+		AlertsDroppedTotal,
+		EnrichmentPanicsTotal,
 		CRDRules,
 		CRDRulesRejectedTotal,
 		CRDStatusUpdatesTotal,

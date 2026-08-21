@@ -114,7 +114,7 @@ func readAlerts(path string) ([]alert.Alert, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
-	if alerts, err := alert.DecodeBatch(raw); err == nil {
+	if alerts, _, err := alert.DecodeBatch(raw); err == nil {
 		return alerts, nil
 	}
 

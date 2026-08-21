@@ -21,6 +21,7 @@ import (
 
 	"github.com/splattner/alertmanager-label-enricher/internal/config"
 	"github.com/splattner/alertmanager-label-enricher/internal/crd"
+	"github.com/splattner/alertmanager-label-enricher/internal/engine"
 	"github.com/splattner/alertmanager-label-enricher/internal/metrics"
 	"github.com/splattner/alertmanager-label-enricher/internal/proxy"
 	fileSource "github.com/splattner/alertmanager-label-enricher/internal/source"
@@ -45,11 +46,11 @@ func newServeCmd() *cobra.Command {
 // generation holds everything that's expensive to rebuild and only changes
 // when the file config itself changes: sources (which starts Kubernetes
 // informers), TLS configs, and the CRD watcher (which starts its own
-// informers). server.compileAndSwap, below, reuses the current
-// generation's sources/watcher and only recompiles the engine - so a
-// CR-only change (the common case once the CRD watch is enabled) never
-// restarts a Kubernetes source informer or flaps /readyz the way
-// rebuilding everything would.
+// informers). server.compileAndSwap, below, reuses one generation's
+// sources/watcher and only recompiles the engine - so a CR-only change
+// (the common case once the CRD watch is enabled) never restarts a
+// Kubernetes source informer or flaps /readyz the way rebuilding
+// everything would.
 type generation struct {
 	cfg           *config.Config
 	sources       *fileSource.Registry
@@ -61,13 +62,17 @@ type generation struct {
 // server holds the mutable state a running `serve` invocation swaps as
 // config reloads happen. It's a struct (rather than the closures-over-
 // locals runServe used to build it from) so tests can drive
-// buildGeneration/compileAndSwap directly against an injected kubeClient
+// applyConfig/compileAndSwap directly against an injected kubeClient
 // factory - e.g. a fake dynamic client - instead of a real cluster.
 type server struct {
 	configPath string
 	log        *slog.Logger
 	proxy      *proxy.Server
 	kubeClient func() (dynamic.Interface, error)
+	// buildEngine is wiring.BuildEngine, indirected like kubeClient so
+	// tests can force the compile stage to fail and assert that a failed
+	// reload leaves the running generation untouched.
+	buildEngine func(*config.Config, engine.Sources) (*engine.Engine, error)
 
 	genCancel  atomic.Pointer[context.CancelFunc]
 	currentGen atomic.Pointer[generation]
@@ -75,29 +80,34 @@ type server struct {
 
 func newServer(configPath string, log *slog.Logger) *server {
 	return &server{
-		configPath: configPath,
-		log:        log,
-		proxy:      proxy.New(log),
-		kubeClient: wiring.KubeClient,
+		configPath:  configPath,
+		log:         log,
+		proxy:       proxy.New(log),
+		kubeClient:  wiring.KubeClient,
+		buildEngine: wiring.BuildEngine,
 	}
 }
 
-// buildGeneration loads the file config and rebuilds everything that
-// depends on it: sources, TLS configs, and (if enabled) the CRD watcher.
-// It stores the result as the new current generation and cancels the
-// previous one's context, but does not itself compile the engine or
-// publish server state - call compileAndSwap for that.
-func (s *server) buildGeneration(ctx context.Context) error {
+// buildGeneration loads the file config and constructs everything that
+// depends on it: sources, TLS configs, and (if enabled) the CRD watcher,
+// all running under their own context. It deliberately does NOT publish
+// anything - not the generation, not the engine, not the proxy state - so
+// a caller that fails later can discard the whole thing by calling the
+// returned cancel and leave the running configuration untouched.
+//
+// On error it has already torn down whatever it started, and the returned
+// cancel is nil.
+func (s *server) buildGeneration(ctx context.Context) (*generation, context.CancelFunc, error) {
 	cfg, err := config.Load(s.configPath)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 
 	var kubeClient dynamic.Interface
 	if wiring.NeedsKubeClient(cfg) {
 		kubeClient, err = s.kubeClient()
 		if err != nil {
-			return fmt.Errorf("build kubernetes client: %w", err)
+			return nil, nil, fmt.Errorf("build kubernetes client: %w", err)
 		}
 	}
 
@@ -105,7 +115,7 @@ func (s *server) buildGeneration(ctx context.Context) error {
 		s.log.Info(fmt.Sprintf(format, args...))
 	})
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 
 	var forwardClient *http.Client
@@ -113,7 +123,7 @@ func (s *server) buildGeneration(ctx context.Context) error {
 		t := cfg.Forward.TLS
 		tlsCfg, err := tlsutil.ClientConfig(t.CAFile, t.CertFile, t.KeyFile, t.InsecureSkipVerify)
 		if err != nil {
-			return fmt.Errorf("build forward tls config: %w", err)
+			return nil, nil, fmt.Errorf("build forward tls config: %w", err)
 		}
 		forwardClient = &http.Client{Transport: &http.Transport{TLSClientConfig: tlsCfg}}
 	}
@@ -122,91 +132,126 @@ func (s *server) buildGeneration(ctx context.Context) error {
 	if cfg.Server.TLS != nil {
 		serverTLS, err = tlsutil.ServerConfig(cfg.Server.TLS.CertFile, cfg.Server.TLS.KeyFile, cfg.Server.TLS.ClientCAFile)
 		if err != nil {
-			return fmt.Errorf("build server tls config: %w", err)
+			return nil, nil, fmt.Errorf("build server tls config: %w", err)
 		}
+	}
+
+	gen := &generation{
+		cfg:           cfg,
+		forwardClient: forwardClient,
+		serverTLS:     serverTLS,
+		sources:       sources,
 	}
 
 	genCtx, cancel := context.WithCancel(ctx)
 	if err := sources.Start(genCtx); err != nil {
 		cancel()
-		return err
+		return nil, nil, err
 	}
 
-	var watcher *crd.Watcher
 	if cfg.CRD.Enabled {
-		watcher = crd.New(kubeClient, crd.Config{
+		// OnChange closes over gen rather than reading s.currentGen, so a
+		// watcher belonging to a superseded generation can never recompile
+		// against a newer one's sources. compileAndSwap drops the result if
+		// gen is no longer live.
+		gen.watcher = crd.New(kubeClient, crd.Config{
 			Enforcement: cfg.Enforcement,
 			Logf: func(format string, args ...any) {
 				s.log.Info(fmt.Sprintf(format, args...))
 			},
 			OnChange: func() {
-				if err := s.compileAndSwap(genCtx); err != nil {
+				if err := s.compileAndSwap(genCtx, gen); err != nil {
 					s.log.Error("recompile after EnrichmentRule change failed", "error", err.Error())
 					return
 				}
 				s.log.Info("engine recompiled after EnrichmentRule change")
 			},
 		})
-		if err := watcher.Start(genCtx); err != nil {
+		if err := gen.watcher.Start(genCtx); err != nil {
 			cancel()
-			return fmt.Errorf("start crd watcher: %w", err)
+			return nil, nil, fmt.Errorf("start crd watcher: %w", err)
 		}
 	}
 
-	s.currentGen.Store(&generation{
-		cfg:           cfg,
-		sources:       sources,
-		watcher:       watcher,
-		forwardClient: forwardClient,
-		serverTLS:     serverTLS,
-	})
-
-	if prev := s.genCancel.Swap(&cancel); prev != nil {
-		(*prev)()
-	}
-	return nil
+	return gen, cancel, nil
 }
 
-// compileAndSwap recompiles the engine from the current generation's
-// file-config rules plus (if the CRD watch is enabled) whatever
-// EnrichmentRule CRs internal/crd currently accepts, and atomically swaps
-// it into the running server.
-func (s *server) compileAndSwap(ctx context.Context) error {
-	gen := s.currentGen.Load()
-	if gen == nil {
-		return fmt.Errorf("no configuration generation built yet")
-	}
-
+// compile builds the engine for gen from its file-config rules plus (if the
+// CRD watch is enabled) whatever EnrichmentRule CRs internal/crd currently
+// accepts. It has no side effects on the running server.
+func (s *server) compile(ctx context.Context, gen *generation) (*proxy.State, error) {
 	engineCfg := *gen.cfg
 	if gen.watcher != nil {
 		engineCfg.Rules = append(append([]config.RuleConfig{}, gen.cfg.Rules...), gen.watcher.Reconcile(ctx)...)
 	}
-	eng, err := wiring.BuildEngine(&engineCfg, gen.sources)
+	eng, err := s.buildEngine(&engineCfg, gen.sources)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	synced := gen.sources.HasSynced
-	if gen.watcher != nil {
-		w := gen.watcher
+	if w := gen.watcher; w != nil {
 		synced = func() bool { return gen.sources.HasSynced() && w.HasSynced() }
 	}
 
-	s.proxy.SetState(&proxy.State{
+	return &proxy.State{
 		Cfg:           gen.cfg,
 		Engine:        eng,
 		Synced:        synced,
 		ForwardClient: gen.forwardClient,
 		ServerTLS:     gen.serverTLS,
-	})
+	}, nil
+}
+
+// compileAndSwap recompiles gen's engine and installs it, provided gen is
+// still the live generation. It is the CRD watcher's path: sources and
+// informers are untouched, only the rule set changes.
+//
+// The liveness check matters because a watcher outlives the instant its
+// generation is replaced - its debounce timer may already be armed when a
+// file-config reload swaps in a new generation. Publishing then would
+// resurrect the superseded config.
+func (s *server) compileAndSwap(ctx context.Context, gen *generation) error {
+	state, err := s.compile(ctx, gen)
+	if err != nil {
+		return err
+	}
+	if s.currentGen.Load() != gen {
+		s.log.Info("skipped recompile from a superseded configuration generation")
+		return nil
+	}
+	s.proxy.SetState(state)
 	return nil
 }
 
+// applyConfig swaps in a whole new configuration generation atomically:
+// everything is built and the engine fully compiled before any of it
+// becomes visible, and the previous generation keeps running - informers
+// included - until the new one is known good.
+//
+// Ordering is the point. Publishing or cancelling before the compile can
+// fail would leave the proxy serving an engine whose sources have already
+// been shut down, with /readyz still green because a stopped informer
+// keeps reporting HasSynced.
 func (s *server) applyConfig(ctx context.Context) error {
-	if err := s.buildGeneration(ctx); err != nil {
+	gen, cancel, err := s.buildGeneration(ctx)
+	if err != nil {
 		return err
 	}
-	return s.compileAndSwap(ctx)
+
+	state, err := s.compile(ctx, gen)
+	if err != nil {
+		cancel() // discard the half-built generation; the running one is untouched
+		return err
+	}
+
+	s.currentGen.Store(gen)
+	s.proxy.SetState(state)
+
+	if prev := s.genCancel.Swap(&cancel); prev != nil {
+		(*prev)()
+	}
+	return nil
 }
 
 func runServe(configPath string) error {

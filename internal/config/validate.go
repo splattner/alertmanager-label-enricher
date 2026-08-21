@@ -7,6 +7,8 @@ import (
 
 	"github.com/itchyny/gojq"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/splattner/alertmanager-label-enricher/internal/extract"
 )
 
 // Validate checks a Config for internal consistency: required fields,
@@ -243,7 +245,16 @@ func validateSet(s *SetAction, sourceNames map[string]bool) error {
 		if s.From.Jq == "" {
 			return fmt.Errorf("set.%s %q: from.jq is required", kind, name)
 		}
-		if _, err := gojq.Parse(s.From.Jq); err != nil {
+		// Parse then Compile: parsing alone accepts expressions that fail
+		// to compile (an undefined function, an unbound variable), which
+		// would otherwise pass `enricher check` and only surface when
+		// engine.Compile runs - i.e. during a reload, where the failure
+		// costs a configuration swap rather than a validation error.
+		query, err := gojq.Parse(s.From.Jq)
+		if err != nil {
+			return fmt.Errorf("set.%s %q: invalid jq %q: %w", kind, name, s.From.Jq, err)
+		}
+		if _, err := gojq.Compile(query, gojq.WithVariables(extract.VarNames)); err != nil {
 			return fmt.Errorf("set.%s %q: invalid jq %q: %w", kind, name, s.From.Jq, err)
 		}
 		if s.From.Regex != "" {

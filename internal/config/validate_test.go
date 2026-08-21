@@ -307,3 +307,40 @@ func assertRejects(t *testing.T, cfg *Config, wantSubstr string) {
 		t.Fatalf("error = %q, want substring %q", err.Error(), wantSubstr)
 	}
 }
+
+// gojq.Parse accepts expressions that gojq.Compile rejects - an undefined
+// function, an unbound variable. Validation must catch those, or they pass
+// `enricher check` and only fail when engine.Compile runs, which is during
+// a reload: a failed configuration swap rather than a validation error.
+func TestValidateRejectsJqThatParsesButDoesNotCompile(t *testing.T) {
+	for _, jq := range []string{".x | no_such_function", "$nosuchvar"} {
+		cfg := &Config{
+			Targets: []TargetConfig{{URL: "http://am:9093"}},
+			Sources: []SourceConfig{{Name: "s", Type: "file", File: &FileSourceSpec{Path: "/tmp/x"}}},
+			Rules: []RuleConfig{{
+				Name:    "r",
+				Actions: []ActionConfig{{Set: &SetAction{Label: "a", From: &FromConfig{Source: "s", Jq: jq}}}},
+			}},
+		}
+		applyDefaults(cfg)
+		if err := Validate(cfg); err == nil {
+			t.Errorf("Validate accepted jq %q, which engine.Compile would reject at reload time", jq)
+		}
+	}
+}
+
+// The variables the engine binds must still validate.
+func TestValidateAcceptsJqUsingBoundVariables(t *testing.T) {
+	cfg := &Config{
+		Targets: []TargetConfig{{URL: "http://am:9093"}},
+		Sources: []SourceConfig{{Name: "s", Type: "file", File: &FileSourceSpec{Path: "/tmp/x"}}},
+		Rules: []RuleConfig{{
+			Name:    "r",
+			Actions: []ActionConfig{{Set: &SetAction{Label: "a", From: &FromConfig{Source: "s", Jq: `.[$labels.namespace] // $annotations.summary`}}}},
+		}},
+	}
+	applyDefaults(cfg)
+	if err := Validate(cfg); err != nil {
+		t.Fatalf("Validate rejected jq using $labels/$annotations, which the engine does bind: %v", err)
+	}
+}

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -21,7 +22,9 @@ import (
 	"k8s.io/client-go/dynamic"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 
+	"github.com/splattner/alertmanager-label-enricher/internal/config"
 	"github.com/splattner/alertmanager-label-enricher/internal/crd"
+	"github.com/splattner/alertmanager-label-enricher/internal/engine"
 )
 
 // These tests exercise the wiring runServe assembles - buildGeneration,
@@ -216,5 +219,108 @@ func TestCRChangeTriggersDebouncedRecompile(t *testing.T) {
 			t.Fatalf("engine was not recompiled with the new EnrichmentRule within 5s of it being created")
 		}
 		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// A reload that fails must leave the running configuration completely
+// intact. Before ALE-04 was fixed, buildGeneration stored the new
+// generation and cancelled the old one's context - stopping its informers -
+// before the compile could fail, leaving the proxy serving an engine whose
+// sources were dead while /readyz stayed green.
+//
+// The failure is injected through the buildEngine seam rather than through
+// a deliberately broken config: what's under test is the ordering of
+// build/compile/publish/cancel, which must hold however the compile fails.
+func TestFailedReloadLeavesRunningGenerationIntact(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer target.Close()
+
+	client := newFakeDynamicClient(namespaceObj("default"))
+	s := newServer(writeCRDConfig(t, target.URL), discardLogger())
+	s.kubeClient = func() (dynamic.Interface, error) { return client, nil }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := s.applyConfig(ctx); err != nil {
+		t.Fatalf("initial applyConfig: %v", err)
+	}
+	live := s.currentGen.Load()
+	liveState := s.proxy.State()
+
+	s.buildEngine = func(*config.Config, engine.Sources) (*engine.Engine, error) {
+		return nil, errors.New("compile blew up")
+	}
+	if err := s.applyConfig(ctx); err == nil {
+		t.Fatal("expected the reload to fail at the compile stage")
+	}
+
+	if got := s.currentGen.Load(); got != live {
+		t.Error("currentGen was replaced by a reload that failed; the running generation must survive untouched")
+	}
+	if got := s.proxy.State(); got != liveState {
+		t.Error("proxy state was replaced by a reload that failed")
+	}
+	if !live.watcher.HasSynced() {
+		t.Error("the surviving generation's CRD watcher is no longer synced")
+	}
+
+	// The decisive check. A cancelled informer keeps reporting HasSynced,
+	// so instead assert that the surviving generation still *observes*
+	// cluster changes - something a torn-down informer cannot do.
+	if _, err := client.Resource(crd.GVR).Namespace("default").Create(ctx,
+		enrichmentRuleObj("default", "add-note", setAnnotationSpec("note", "hello")), metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create EnrichmentRule: %v", err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		for _, r := range live.watcher.Rules() {
+			if r.Name == "default/add-note" {
+				return // informer still live and watching: the failed reload really was a no-op
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the surviving generation's informer stopped observing changes - the failed reload tore it down")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// A CRD watcher whose generation has been superseded must not be able to
+// publish its (stale) engine over the live one.
+func TestSupersededGenerationCannotPublish(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer target.Close()
+
+	client := newFakeDynamicClient(namespaceObj("default"))
+	s := newServer(writeCRDConfig(t, target.URL), discardLogger())
+	s.kubeClient = func() (dynamic.Interface, error) { return client, nil }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := s.applyConfig(ctx); err != nil {
+		t.Fatalf("first applyConfig: %v", err)
+	}
+	stale := s.currentGen.Load()
+
+	if err := s.applyConfig(ctx); err != nil {
+		t.Fatalf("second applyConfig: %v", err)
+	}
+	fresh := s.proxy.State()
+	if s.currentGen.Load() == stale {
+		t.Fatal("second applyConfig did not install a new generation")
+	}
+
+	// Simulate the stale watcher's debounce timer firing after the swap.
+	if err := s.compileAndSwap(ctx, stale); err != nil {
+		t.Fatalf("compileAndSwap on a stale generation returned an error: %v", err)
+	}
+	if s.proxy.State() != fresh {
+		t.Error("a superseded generation republished its engine over the live one")
 	}
 }

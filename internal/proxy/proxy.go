@@ -12,6 +12,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -121,11 +122,15 @@ func (s *Server) handleAlerts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	alerts, err := alert.DecodeBatch(body)
+	alerts, malformed, err := alert.DecodeBatch(body)
 	if err != nil {
 		metrics.AlertsForwardedTotal.WithLabelValues("decode_error").Inc()
 		http.Error(w, "decode alerts: "+err.Error(), http.StatusBadRequest)
 		return
+	}
+	if malformed > 0 {
+		metrics.AlertsDroppedTotal.WithLabelValues("malformed").Add(float64(malformed))
+		s.log.Warn("dropped malformed alerts from batch", "count", malformed)
 	}
 	metrics.AlertsReceivedTotal.Add(float64(len(alerts)))
 
@@ -167,6 +172,13 @@ func (s *Server) handleAlerts(w http.ResponseWriter, r *http.Request) {
 // RequiredFailure cancels the remaining in-flight alerts and, once every
 // goroutine has returned, aborts the whole batch — forwarding without the
 // required label is unsafe.
+//
+// Every alert is also enriched under a panic backstop. These goroutines are
+// not the ones net/http recovers, so without it any panic reachable from a
+// single malformed alert would terminate the process and stop alert
+// delivery entirely. A recovered panic is always a bug: it is logged with
+// its stack, counted in ale_enrichment_panics_total, and the alert is
+// forwarded in whatever state it reached — degraded delivery beats none.
 func (s *Server) enrich(ctx context.Context, eng *engine.Engine, alerts []alert.Alert, maxConcurrency int) error {
 	g, gctx := errgroup.WithContext(ctx)
 	if maxConcurrency > 0 {
@@ -174,15 +186,24 @@ func (s *Server) enrich(ctx context.Context, eng *engine.Engine, alerts []alert.
 	}
 
 	for _, a := range alerts {
-		g.Go(func() error {
-			results, err := eng.Apply(gctx, a)
-			recordResults(results)
-			if err != nil {
-				var reqFail *engine.RequiredFailure
-				if errors.As(err, &reqFail) {
-					return err
+		g.Go(func() (err error) {
+			defer func() {
+				if r := recover(); r != nil {
+					metrics.EnrichmentPanicsTotal.Inc()
+					s.log.Error("panic while enriching an alert; forwarding it un-enriched",
+						"panic", fmt.Sprint(r), "stack", string(debug.Stack()))
+					err = nil
 				}
-				s.log.Warn("alert enrichment failed", "error", err.Error())
+			}()
+
+			results, aerr := eng.Apply(gctx, a)
+			recordResults(results)
+			if aerr != nil {
+				var reqFail *engine.RequiredFailure
+				if errors.As(aerr, &reqFail) {
+					return aerr
+				}
+				s.log.Warn("alert enrichment failed", "error", aerr.Error())
 			}
 			return nil
 		})
