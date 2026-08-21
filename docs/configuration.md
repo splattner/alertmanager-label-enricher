@@ -323,6 +323,11 @@ Kubernetes namespace, then a second rule maps `team` to an on-call
 `escalation` label) works by declaring rules in the right order. This is
 the one thing about rule semantics most likely to surprise a new reader.
 
+Within a rule, actions run in declared order too — `set` and `drop` are
+not reordered relative to each other, and a later action sees what an
+earlier one did. So `[set tmp, drop tmp]` leaves `tmp` gone, while
+`[drop tmp, set tmp]` leaves it set.
+
 ### Failure semantics
 
 | Situation | `required: false` (default) | `required: true` |
@@ -418,6 +423,12 @@ Served at `/metrics`, all under the `ale_` prefix:
 | `ale_alerts_forwarded_total` | `result` (`ok`\|`required_failed`\|`decode_error`\|`forward_failed`) | alert batches, by outcome |
 | `ale_alerts_dropped_total` | `reason` (`malformed`\|`no_labels`) | individual alerts dropped from an otherwise-forwarded batch — dropping one alert is deliberately preferred to rejecting the batch it arrived in |
 | `ale_label_drops_refused_total` | `rule`, `label` | a `drop` skipped because the label was the alert's last one (see [An alert's last label is never dropped](#an-alerts-last-label-is-never-dropped)) |
+
+Rule names in this file must not contain `/`. Rules sourced from an
+`EnrichmentRule` CR compile to `<namespace>/<name>`, so reserving the
+separator keeps every `rule` label unambiguous about where its rule came
+from — and stops a file rule from silently sharing a metric series with a
+tenant's.
 | `ale_enrichment_panics_total` | — | panics recovered while enriching one alert. **Always a bug**; the alert is forwarded un-enriched rather than taking the process down. Any nonzero value warrants investigation |
 | `ale_rule_evaluations_total` | `rule`, `result` (`matched`\|`skipped`\|`required_failed`) | one rule's evaluation against one alert |
 | `ale_labels_added_total` | `rule`, `label` | a label newly added |

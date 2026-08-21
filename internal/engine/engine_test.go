@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -702,5 +703,106 @@ func TestDropRemovesTheLastAnnotation(t *testing.T) {
 	annotations, _ := a.Annotations()
 	if len(annotations) != 0 {
 		t.Fatalf("annotations = %v, want the last annotation dropped normally", annotations)
+	}
+}
+
+// ALE-11. Apply used to run every drop in a rule before any of its sets,
+// so a rule read one way and behaved another. Actions now execute in the
+// order they are written.
+func TestActionsRunInDeclaredOrder(t *testing.T) {
+	tests := []struct {
+		name    string
+		actions []config.ActionConfig
+		want    map[string]string
+	}{
+		{
+			name: "set then drop leaves the label gone",
+			actions: []config.ActionConfig{
+				{Set: &config.SetAction{Label: "tmp", Value: "v"}},
+				{Drop: &config.DropAction{Label: "tmp"}},
+			},
+			want: map[string]string{"alertname": "T"},
+		},
+		{
+			name: "drop then set leaves the label set",
+			actions: []config.ActionConfig{
+				{Drop: &config.DropAction{Label: "tmp"}},
+				{Set: &config.SetAction{Label: "tmp", Value: "v"}},
+			},
+			want: map[string]string{"alertname": "T", "tmp": "v"},
+		},
+		{
+			name: "a later set can read what an earlier one wrote",
+			actions: []config.ActionConfig{
+				{Set: &config.SetAction{Label: "team", Value: "payments"}},
+				{Set: &config.SetAction{Label: "oncall", Template: "{{ .Labels.team }}-oncall"}},
+			},
+			want: map[string]string{"alertname": "T", "team": "payments", "oncall": "payments-oncall"},
+		},
+		{
+			name: "a set after a drop of the same label sees it absent",
+			actions: []config.ActionConfig{
+				{Set: &config.SetAction{Label: "env", Value: "first"}},
+				{Drop: &config.DropAction{Label: "env"}},
+				{Set: &config.SetAction{Label: "env", Value: "second"}},
+			},
+			want: map[string]string{"alertname": "T", "env": "second"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &config.Config{Rules: []config.RuleConfig{{Name: "r", Actions: tt.actions}}}
+			eng, err := Compile(cfg, fakeRegistry{}, extract.NewCache())
+			if err != nil {
+				t.Fatal(err)
+			}
+			a := newAlert(map[string]string{"alertname": "T"})
+			if _, err := eng.Apply(context.Background(), a); err != nil {
+				t.Fatal(err)
+			}
+			labels, _ := a.Labels()
+			if len(labels) != len(tt.want) {
+				t.Fatalf("labels = %v, want %v", labels, tt.want)
+			}
+			for k, v := range tt.want {
+				if labels[k] != v {
+					t.Errorf("labels[%q] = %q, want %q (full: %v)", k, labels[k], v, labels)
+				}
+			}
+		})
+	}
+}
+
+// ALE-12. The most common required-failure path is a clean miss: the
+// lookup worked, the jq matched nothing, no default. err is nil there, so
+// the message an on-call engineer saw during a live outage read
+// "could not be set: <nil>".
+func TestRequiredFailureExplainsACleanMiss(t *testing.T) {
+	cfg := &config.Config{Rules: []config.RuleConfig{{
+		Name:     "team-required",
+		Required: true,
+		Actions: []config.ActionConfig{{Set: &config.SetAction{
+			Label: "team",
+			From:  &config.FromConfig{Source: "ns", Jq: `.metadata.labels["team"]`},
+		}}},
+	}}}
+	eng, err := Compile(cfg, fakeRegistry{"ns": &fakeSource{value: map[string]any{"metadata": map[string]any{}}}}, extract.NewCache())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = eng.Apply(context.Background(), newAlert(map[string]string{"alertname": "T"}))
+	if err == nil {
+		t.Fatal("expected a RequiredFailure")
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "<nil>") {
+		t.Errorf("the 503 reason still reads %q - it must say what actually went wrong", msg)
+	}
+	for _, want := range []string{"team-required", `"team"`, "ns", "default"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("message %q does not mention %q", msg, want)
+		}
 	}
 }

@@ -61,7 +61,8 @@ templating/jq mini-languages used inside rules.
 
 Rules run in declared order and **all matching rules apply** — a rule is
 not skipped because an earlier one already set a label. Later rules see the
-labels earlier rules added. Matchers within one rule are ANDed.
+labels earlier rules added. Within a rule, actions also run in declared
+order. Matchers within one rule are ANDed.
 
 Adding a new label is always allowed. Overwriting or dropping an existing
 one changes the alert's fingerprint in Alertmanager — which can invalidate
