@@ -40,7 +40,7 @@ func TestRuleWithNoPolicyRulesPassesThroughUnrestricted(t *testing.T) {
 	r := baseRule()
 	r.Match = []config.MatchConfig{{Label: "severity", Op: config.OpExists}}
 
-	got, err := Rule(r, "payments", map[string]string{}, config.EnforcementConfig{})
+	got, err := Rule(r, "payments", map[string]string{}, testSources, config.EnforcementConfig{})
 	if err != nil {
 		t.Fatalf("Rule: %v", err)
 	}
@@ -53,7 +53,7 @@ func TestRuleInjectsNamespaceMatcher(t *testing.T) {
 	cfg := policyFor(catchAll(config.EnforcementRuleConfig{}))
 	r := baseRule()
 
-	got, err := Rule(r, "payments", map[string]string{}, cfg)
+	got, err := Rule(r, "payments", map[string]string{}, testSources, cfg)
 	if err != nil {
 		t.Fatalf("Rule: %v", err)
 	}
@@ -68,7 +68,7 @@ func TestRuleAppendsInjectedMatcherRatherThanReplacingTenantMatchers(t *testing.
 	r := baseRule()
 	r.Match = []config.MatchConfig{{Label: "severity", Op: config.OpExists}}
 
-	got, err := Rule(r, "payments", map[string]string{}, cfg)
+	got, err := Rule(r, "payments", map[string]string{}, testSources, cfg)
 	if err != nil {
 		t.Fatalf("Rule: %v", err)
 	}
@@ -92,7 +92,7 @@ func TestRuleWithContradictingTenantNamespaceMatcherGetsBothANDed(t *testing.T) 
 	r := baseRule()
 	r.Match = []config.MatchConfig{{Label: "namespace", Op: config.OpEq, Value: "other-tenant"}}
 
-	got, err := Rule(r, "payments", map[string]string{}, cfg)
+	got, err := Rule(r, "payments", map[string]string{}, testSources, cfg)
 	if err != nil {
 		t.Fatalf("Rule: %v", err)
 	}
@@ -111,7 +111,7 @@ func TestRuleRejectsWhenNoNamespaceSelectorMatches(t *testing.T) {
 	cfg := policyFor(config.EnforcementRuleConfig{
 		NamespaceSelector: metav1.LabelSelector{MatchLabels: map[string]string{"tenant-isolation": "enabled"}},
 	})
-	_, err := Rule(baseRule(), "payments", map[string]string{}, cfg)
+	_, err := Rule(baseRule(), "payments", map[string]string{}, testSources, cfg)
 	assertRejects(t, err, "matches no enforcement policy")
 }
 
@@ -145,7 +145,7 @@ func TestRuleRejectsSetOnDeniedLabel(t *testing.T) {
 	cfg := policyFor(catchAll(config.EnforcementRuleConfig{Labels: config.LabelPolicyConfig{Deny: []string{"severity"}}}))
 	r := config.RuleConfig{Name: "x", Actions: []config.ActionConfig{{Set: &config.SetAction{Label: "severity", Value: "critical"}}}}
 
-	_, err := Rule(r, "payments", map[string]string{}, cfg)
+	_, err := Rule(r, "payments", map[string]string{}, testSources, cfg)
 	assertRejects(t, err, `label "severity" is denied`)
 }
 
@@ -157,21 +157,21 @@ func TestRuleRejectsSetOnNamespaceScopingLabelEvenWithoutDenyList(t *testing.T) 
 	cfg := policyFor(catchAll(config.EnforcementRuleConfig{}))
 	r := config.RuleConfig{Name: "x", Actions: []config.ActionConfig{{Set: &config.SetAction{Label: "namespace", Value: "other-tenant"}}}}
 
-	_, err := Rule(r, "payments", map[string]string{}, cfg)
-	assertRejects(t, err, "namespace-scoping label")
+	_, err := Rule(r, "payments", map[string]string{}, testSources, cfg)
+	assertRejects(t, err, "asserted by this namespace's enforcement policy")
 }
 
 func TestRuleRejectsDropOfNamespaceScopingLabel(t *testing.T) {
 	cfg := policyFor(catchAll(config.EnforcementRuleConfig{}))
 	r := config.RuleConfig{Name: "x", Actions: []config.ActionConfig{{Drop: &config.DropAction{Label: "namespace"}}}}
 
-	_, err := Rule(r, "payments", map[string]string{}, cfg)
-	assertRejects(t, err, "namespace-scoping label")
+	_, err := Rule(r, "payments", map[string]string{}, testSources, cfg)
+	assertRejects(t, err, "asserted by this namespace's enforcement policy")
 }
 
 func TestRuleAllowsAnnotationsUnrestrictedByDefault(t *testing.T) {
 	cfg := policyFor(catchAll(config.EnforcementRuleConfig{}))
-	if _, err := Rule(baseRule(), "payments", map[string]string{}, cfg); err != nil {
+	if _, err := Rule(baseRule(), "payments", map[string]string{}, testSources, cfg); err != nil {
 		t.Fatalf("annotations should be unrestricted by default, got: %v", err)
 	}
 }
@@ -180,7 +180,7 @@ func TestRuleRejectsAnnotationNotInAllowList(t *testing.T) {
 	cfg := policyFor(catchAll(config.EnforcementRuleConfig{
 		Annotations: config.LabelPolicyConfig{Allow: []string{"dashboard_url"}},
 	}))
-	_, err := Rule(baseRule(), "payments", map[string]string{}, cfg) // sets runbook_url
+	_, err := Rule(baseRule(), "payments", map[string]string{}, testSources, cfg) // sets runbook_url
 	assertRejects(t, err, `annotation "runbook_url" is not in this namespace's allow list`)
 }
 
@@ -190,7 +190,7 @@ func TestRuleAllowListTakesPrecedenceOverDenyList(t *testing.T) {
 	}))
 	r := config.RuleConfig{Name: "x", Actions: []config.ActionConfig{{Set: &config.SetAction{Label: "team", Value: "platform"}}}}
 
-	if _, err := Rule(r, "payments", map[string]string{}, cfg); err != nil {
+	if _, err := Rule(r, "payments", map[string]string{}, testSources, cfg); err != nil {
 		t.Fatalf("allow list should take precedence over deny, got: %v", err)
 	}
 }
@@ -201,8 +201,8 @@ func TestRuleRejectsSourceNotInAllowedSources(t *testing.T) {
 		Label: "team", From: &config.FromConfig{Source: "secrets", Jq: ".team"},
 	}}}}
 
-	_, err := Rule(r, "payments", map[string]string{}, cfg)
-	assertRejects(t, err, `"secrets" is not a declared source`)
+	_, err := Rule(r, "payments", map[string]string{}, testSources, cfg)
+	assertRejects(t, err, `source "secrets" is not permitted`)
 }
 
 func TestRuleAllowsSourceInAllowedSources(t *testing.T) {
@@ -211,7 +211,7 @@ func TestRuleAllowsSourceInAllowedSources(t *testing.T) {
 		Label: "team", From: &config.FromConfig{Source: "ns", Jq: ".team"},
 	}}}}
 
-	if _, err := Rule(r, "payments", map[string]string{}, cfg); err != nil {
+	if _, err := Rule(r, "payments", map[string]string{}, testSources, cfg); err != nil {
 		t.Fatalf("source in allowedSources should be permitted, got: %v", err)
 	}
 }
@@ -221,7 +221,7 @@ func TestRuleRejectsRequiredUnlessPolicyAllows(t *testing.T) {
 	r := baseRule()
 	r.Required = true
 
-	_, err := Rule(r, "payments", map[string]string{}, cfg)
+	_, err := Rule(r, "payments", map[string]string{}, testSources, cfg)
 	assertRejects(t, err, "required: true is not permitted")
 }
 
@@ -230,7 +230,89 @@ func TestRuleAllowsRequiredWhenPolicyGrantsIt(t *testing.T) {
 	r := baseRule()
 	r.Required = true
 
-	if _, err := Rule(r, "payments", map[string]string{}, cfg); err != nil {
+	if _, err := Rule(r, "payments", map[string]string{}, testSources, cfg); err != nil {
 		t.Fatalf("required: true should be permitted when the policy allows it, got: %v", err)
+	}
+}
+
+// testSources is what the file config declares. Enforcement decides which
+// of these a given namespace may use; a rule naming anything outside this
+// set is malformed, not merely disallowed.
+var testSources = map[string]bool{"ns": true, "secrets": true}
+
+// ALE-07. The policy asserts `cluster == prod` as an authoritative
+// matcher. Matchers run before actions, so without this the rule fires
+// only on production alerts and then relabels them `cluster=staging` -
+// defeating the very scoping the matcher exists to provide.
+func TestRuleRejectsWritingALabelThePolicyAsserts(t *testing.T) {
+	cfg := policyFor(catchAll(config.EnforcementRuleConfig{
+		Match: []config.MatchConfig{{Label: "cluster", Op: config.OpEq, Value: "prod"}},
+	}))
+
+	for _, a := range []config.ActionConfig{
+		{Set: &config.SetAction{Label: "cluster", Value: "staging", Overwrite: true}},
+		{Set: &config.SetAction{Label: "cluster", Value: "staging"}},
+		{Drop: &config.DropAction{Label: "cluster"}},
+	} {
+		r := config.RuleConfig{Name: "x", Actions: []config.ActionConfig{a}}
+		if _, err := Rule(r, "payments", nil, testSources, cfg); err == nil {
+			t.Errorf("action %+v was accepted; a label the policy asserts must be unwritable", a)
+		}
+	}
+}
+
+// Every asserted label is protected, not just the first.
+func TestRuleProtectsEveryAssertedLabel(t *testing.T) {
+	cfg := policyFor(catchAll(config.EnforcementRuleConfig{
+		Match: []config.MatchConfig{
+			{Label: "cluster", Op: config.OpEq, Value: "prod"},
+			{Label: "region", Op: config.OpEq, Value: "eu"},
+		},
+	}))
+	cfg.NamespaceMatcherLabel = "namespace"
+
+	for _, label := range []string{"namespace", "cluster", "region"} {
+		r := config.RuleConfig{Name: "x", Actions: []config.ActionConfig{
+			{Set: &config.SetAction{Label: label, Value: "elsewhere", Overwrite: true}},
+		}}
+		if _, err := Rule(r, "payments", nil, testSources, cfg); err == nil {
+			t.Errorf("label %q is asserted by the policy but was writable", label)
+		}
+	}
+
+	// A label the policy says nothing about stays writable.
+	r := config.RuleConfig{Name: "x", Actions: []config.ActionConfig{
+		{Set: &config.SetAction{Label: "team", Value: "payments"}},
+	}}
+	if _, err := Rule(r, "payments", nil, testSources, cfg); err != nil {
+		t.Errorf("an unasserted label must remain writable, got: %v", err)
+	}
+}
+
+// ALE-05. Single-tenant mode skipped ValidateRule entirely, so a CR with
+// jq that engine.Compile rejects reached the compile and failed it - which
+// on the startup path stopped the process from booting at all.
+func TestRuleValidatesEvenWithNoPolicy(t *testing.T) {
+	none := config.EnforcementConfig{} // single-tenant: no policy rules
+
+	bad := config.RuleConfig{Name: "bad", Actions: []config.ActionConfig{
+		{Set: &config.SetAction{Label: "x", From: &config.FromConfig{Source: "ns", Jq: "..[[["}}},
+	}}
+	if _, err := Rule(bad, "any", nil, testSources, none); err == nil {
+		t.Error("unparseable jq was accepted in single-tenant mode; it would fail engine.Compile and take down the whole recompile")
+	}
+
+	undeclared := config.RuleConfig{Name: "undeclared", Actions: []config.ActionConfig{
+		{Set: &config.SetAction{Label: "x", From: &config.FromConfig{Source: "nope", Jq: "."}}},
+	}}
+	if _, err := Rule(undeclared, "any", nil, testSources, none); err == nil {
+		t.Error("a reference to an undeclared source was accepted in single-tenant mode")
+	}
+
+	good := config.RuleConfig{Name: "good", Actions: []config.ActionConfig{
+		{Set: &config.SetAction{Label: "x", Value: "v"}},
+	}}
+	if _, err := Rule(good, "any", nil, testSources, none); err != nil {
+		t.Errorf("a well-formed rule must still pass in single-tenant mode, got: %v", err)
 	}
 }

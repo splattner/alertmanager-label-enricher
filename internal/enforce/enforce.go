@@ -33,7 +33,7 @@ import (
 // This is single-tenant convenience mode; the caller is responsible for
 // warning about it at startup when the CRD watch is enabled without any
 // enforcement policy configured.
-func Rule(r config.RuleConfig, ns string, nsLabels map[string]string, cfg config.EnforcementConfig) (config.RuleConfig, error) {
+func Rule(r config.RuleConfig, ns string, nsLabels map[string]string, declaredSources map[string]bool, cfg config.EnforcementConfig) (config.RuleConfig, error) {
 	// A CR's rule name is only unique within its own namespace, and a CR
 	// namespace can otherwise be chosen to collide with a file-config rule
 	// name. Compiling to "<namespace>/<name>" keeps ale_rule_evaluations_total
@@ -41,6 +41,15 @@ func Rule(r config.RuleConfig, ns string, nsLabels map[string]string, cfg config
 	// remember to do it. Error messages below still report the tenant's
 	// own r.Name, since that's what they'll recognize from their own CR.
 	compiledName := ns + "/" + r.Name
+
+	// Well-formedness is checked before, and independently of, any policy:
+	// a rule that cannot compile would fail engine.Compile, and that fails
+	// the recompile for every tenant, not just its author. This runs even
+	// in single-tenant mode, where there is no policy to apply - "we trust
+	// whoever writes these" is a statement about intent, not about syntax.
+	if err := config.ValidateRule(r, declaredSources); err != nil {
+		return config.RuleConfig{}, fmt.Errorf("rule %q: %w", r.Name, err)
+	}
 
 	if len(cfg.Rules) == 0 {
 		enforced := r
@@ -53,20 +62,22 @@ func Rule(r config.RuleConfig, ns string, nsLabels map[string]string, cfg config
 		return config.RuleConfig{}, fmt.Errorf("namespace %q matches no enforcement policy", ns)
 	}
 
-	allowedSources := make(map[string]bool, len(policy.AllowedSources))
-	for _, s := range policy.AllowedSources {
-		allowedSources[s] = true
-	}
-	if err := config.ValidateRule(r, allowedSources); err != nil {
-		return config.RuleConfig{}, fmt.Errorf("rule %q: %w", r.Name, err)
+	for _, a := range r.Actions {
+		if a.Set == nil || a.Set.From == nil {
+			continue
+		}
+		if !slices.Contains(policy.AllowedSources, a.Set.From.Source) {
+			return config.RuleConfig{}, fmt.Errorf("rule %q: source %q is not permitted in namespace %q", r.Name, a.Set.From.Source, ns)
+		}
 	}
 
 	if r.Required && !policy.AllowRequired {
 		return config.RuleConfig{}, fmt.Errorf("rule %q: required: true is not permitted in namespace %q", r.Name, ns)
 	}
 
+	protected := protectedLabels(cfg.NamespaceMatcherLabel, policy.Match)
 	for i, a := range r.Actions {
-		if err := checkAction(a, cfg.NamespaceMatcherLabel, policy); err != nil {
+		if err := checkAction(a, protected, policy); err != nil {
 			return config.RuleConfig{}, fmt.Errorf("rule %q: actions[%d]: %w", r.Name, i, err)
 		}
 	}
@@ -75,6 +86,27 @@ func Rule(r config.RuleConfig, ns string, nsLabels map[string]string, cfg config
 	enforced.Name = compiledName
 	enforced.Match = append(append([]config.MatchConfig{}, r.Match...), authoritativeMatchers(cfg.NamespaceMatcherLabel, ns, policy.Match)...)
 	return enforced, nil
+}
+
+// protectedLabels is every label this policy asserts as authoritative: the
+// namespace-scoping label plus each label named in the policy's own match
+// list. All of them must be unwritable by the rule they scope.
+//
+// Matchers are evaluated before actions, so a rule can otherwise satisfy an
+// authoritative matcher and then overwrite the very label that matched it -
+// firing only on `cluster=prod` alerts and relabelling them `cluster=staging`,
+// which defeats the scoping the matcher exists to provide.
+func protectedLabels(namespaceMatcherLabel string, policyMatch []config.MatchConfig) []string {
+	var out []string
+	if namespaceMatcherLabel != "" {
+		out = append(out, namespaceMatcherLabel)
+	}
+	for _, m := range policyMatch {
+		if m.Label != "" && !slices.Contains(out, m.Label) {
+			out = append(out, m.Label)
+		}
+	}
+	return out
 }
 
 // SelectPolicy evaluates cfg.Rules against nsLabels, first match wins - a
@@ -110,29 +142,32 @@ func authoritativeMatchers(namespaceMatcherLabel, ns string, extra []config.Matc
 	return append(out, extra...)
 }
 
-func checkAction(a config.ActionConfig, namespaceMatcherLabel string, policy config.EnforcementRuleConfig) error {
+func checkAction(a config.ActionConfig, protected []string, policy config.EnforcementRuleConfig) error {
 	switch {
 	case a.Set != nil:
-		return checkTarget(a.Set.Label, a.Set.Annotation, namespaceMatcherLabel, policy)
+		return checkTarget(a.Set.Label, a.Set.Annotation, protected, policy)
 	case a.Drop != nil:
-		return checkTarget(a.Drop.Label, a.Drop.Annotation, namespaceMatcherLabel, policy)
+		return checkTarget(a.Drop.Label, a.Drop.Annotation, protected, policy)
 	}
 	return nil
 }
 
-func checkTarget(label, annotation, namespaceMatcherLabel string, policy config.EnforcementRuleConfig) error {
+func checkTarget(label, annotation string, protected []string, policy config.EnforcementRuleConfig) error {
 	if annotation != "" {
-		return checkPolicy("annotation", annotation, policy.Annotations, "")
+		// Annotations are never authoritative - nothing is scoped by one -
+		// so the protected set does not apply to them.
+		return checkPolicy("annotation", annotation, policy.Annotations, nil)
 	}
-	return checkPolicy("label", label, policy.Labels, namespaceMatcherLabel)
+	return checkPolicy("label", label, policy.Labels, protected)
 }
 
 // checkPolicy enforces one LabelPolicyConfig against one target name.
-// alwaysDenied, when set, is checked first and unconditionally - it's how
-// the namespace-scoping label stays unwritable regardless of allow/deny.
-func checkPolicy(kind, name string, policy config.LabelPolicyConfig, alwaysDenied string) error {
-	if alwaysDenied != "" && name == alwaysDenied {
-		return fmt.Errorf("%s %q is the namespace-scoping label and cannot be targeted by a namespaced rule", kind, name)
+// protected is checked first and unconditionally: those labels stay
+// unwritable regardless of allow/deny, because the policy relies on them
+// to scope the rule.
+func checkPolicy(kind, name string, policy config.LabelPolicyConfig, protected []string) error {
+	if slices.Contains(protected, name) {
+		return fmt.Errorf("%s %q is asserted by this namespace's enforcement policy and cannot be targeted by a namespaced rule", kind, name)
 	}
 	if len(policy.Allow) > 0 {
 		if !slices.Contains(policy.Allow, name) {

@@ -349,6 +349,12 @@ scalar, or `null`), with the alert's labels/annotations bound as
 string-interpolating them into the expression, is injection-safe by
 construction.
 
+Evaluation is bounded by [`enrichment.timeout`](#enrichment): an
+expression still running when the deadline passes is cut short and the
+rule fails open (or, for a `required` rule, fails the batch closed). That
+bound matters most for jq arriving through an `EnrichmentRule` CR, where
+the expression is written by a tenant rather than an admin.
+
 The result must stringify to a string, number, or boolean (any other
 shape — an object, array — is an error). `null`, a missing path, or an
 empty string are all treated as "not found", not an error — see
@@ -498,11 +504,13 @@ enforcement:
 | Threat | Control |
 |---|---|
 | A rule with no `match` mutates every alert in the stream | Injected `<namespaceMatcherLabel> == <CR's namespace>` matcher |
-| A tenant rewrites the namespace-scoping label itself, so their alert masquerades as another tenant's | That label is always unwritable by a CR-sourced rule, regardless of `labels.deny` |
+| A tenant rewrites a label the policy asserts — the namespace-scoping label, or one named in the policy's own `match` — so their alert masquerades as another tenant's | Every asserted label is always unwritable by a CR-sourced rule, regardless of `labels.allow`/`labels.deny` |
 | Routing escalation — set `severity=critical` or `team=platform` to page someone else's on-call | `labels.deny` (or `labels.allow`) |
 | Exfiltration — `from: { source: <shared>, jq: '.data.token' }` copies whatever the enricher's ServiceAccount/credentials can read into a label or annotation, landing in a notification | `allowedSources`, default **none** |
 | Availability — `required: true` on a rule that always fails 503s the **whole batch**, not just the tenant's own alerts | `allowRequired`, default **false** |
 | Rule flooding | `maxRulesPerNamespace` |
+| A tenant's `from.jq` burns CPU without end, starving enrichment of its concurrency slots | jq evaluation is bounded by `enrichment.timeout` |
+| A tenant's malformed rule fails the compile, taking every other tenant's rules down with it | CR-sourced rules are fully validated before compilation, in single-tenant mode too; a rule that cannot compile is rejected individually |
 
 A namespace matching **no** `enforcement.rules` entry is fail-closed: CRs
 in it are not compiled into the engine at all, logged and counted (see
@@ -517,6 +525,26 @@ single-tenant convenience mode - fine if you trust everyone who can create
 an `EnrichmentRule`, and it's what you get by just turning `crd.enabled`
 on without also writing an `enforcement` block. The enricher logs a
 startup warning naming the exposure so this isn't a silent footgun.
+
+What single-tenant mode does *not* skip is validation. Every CR-sourced
+rule is checked for well-formedness — jq and regexes compile, `from.source`
+names a declared source, exactly one of value/template/from — before it can
+reach the engine, whether or not a policy applies. Trusting who writes a
+rule says nothing about whether it parses, and a rule that fails to compile
+would fail the recompile for everyone rather than just its author.
+
+### Why every asserted label is unwritable
+
+Matchers are evaluated before actions. A policy that asserts
+`cluster == prod` therefore constrains *which* alerts a tenant rule fires
+on, but on its own does nothing to stop that rule then setting
+`cluster=staging` on the alerts it matched — re-routing production alerts
+while satisfying the matcher that was supposed to contain them. So every
+label the policy asserts, meaning `namespaceMatcherLabel` plus each label
+named in the policy's own `match` list, is unwritable by the rules it
+governs: no `set`, no `drop`, regardless of `labels.allow`/`labels.deny`.
+Labels the policy says nothing about stay writable, subject to the usual
+allow/deny lists.
 
 ### Why enforcement only ever adds matchers, never overrides them
 
