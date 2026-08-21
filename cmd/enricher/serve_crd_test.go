@@ -156,7 +156,7 @@ func TestApplyConfigStartsCRDWatchAndCompilesRules(t *testing.T) {
 		t.Fatalf("expected the CR-sourced rule to set annotations.note=hello, got %v", got[0])
 	}
 
-	cond := awaitReadyCondition(t, ctx, client, "default", "add-note")
+	cond := awaitReadyCondition(ctx, t, client, "default", "add-note")
 	if cond["type"] != "Ready" || cond["status"] != "True" || cond["reason"] != "Compiled" {
 		t.Fatalf("status.conditions[0] = %+v, want Ready/True/Compiled", cond)
 	}
@@ -166,7 +166,7 @@ func TestApplyConfigStartsCRDWatchAndCompilesRules(t *testing.T) {
 // deliberately asynchronous - the engine swap must never wait on the API
 // server - so a test that reads immediately after applyConfig would be
 // racing the background writer.
-func awaitReadyCondition(t *testing.T, ctx context.Context, client dynamic.Interface, ns, name string) map[string]any {
+func awaitReadyCondition(ctx context.Context, t *testing.T, client dynamic.Interface, ns, name string) map[string]any {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
@@ -392,7 +392,7 @@ func TestMalformedCRDoesNotBlockStartup(t *testing.T) {
 	}
 
 	// And the poison CR must be reported to its own author, not silently lost.
-	cond := awaitReadyCondition(t, ctx, client, "attacker", "poison")
+	cond := awaitReadyCondition(ctx, t, client, "attacker", "poison")
 	if cond["status"] != "False" || cond["reason"] != "PolicyViolation" {
 		t.Errorf("condition = %+v, want the rejection reported as False/PolicyViolation", cond)
 	}
