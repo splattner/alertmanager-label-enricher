@@ -116,3 +116,25 @@ func EncodeBatch(alerts []Alert) ([]byte, error) {
 	}
 	return data, nil
 }
+
+// Deliverable filters out alerts Alertmanager would refuse, returning the
+// remainder and how many were removed. Right now that means alerts with no
+// labels: Alertmanager answers 400 for the whole POST when it sees one
+// ("at least one label pair required"), so leaving it in would strand every
+// other alert in the batch — and Prometheus, seeing a failed delivery,
+// would retry the identical payload forever.
+//
+// The returned slice is never nil, so a batch filtered down to nothing
+// still encodes as [] rather than the literal null.
+func Deliverable(alerts []Alert) (kept []Alert, dropped int) {
+	kept = make([]Alert, 0, len(alerts))
+	for _, a := range alerts {
+		labels, err := a.Labels()
+		if err != nil || len(labels) == 0 {
+			dropped++
+			continue
+		}
+		kept = append(kept, a)
+	}
+	return kept, dropped
+}

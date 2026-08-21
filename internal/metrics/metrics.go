@@ -117,6 +117,12 @@ var (
 		Help:      "EnrichmentRule CRs rejected, by namespace and reason.",
 	}, []string{"namespace", "reason"}) // decode_error | namespace_unreadable | policy_violation
 
+	LabelDropsRefusedTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "label_drops_refused_total",
+		Help:      "Drop actions declined because the label was the alert's last one. Alertmanager rejects an alert with no labels, and rejects the whole batch with it, so the drop is skipped to keep the batch deliverable.",
+	}, []string{"rule", "label"})
+
 	AlertsDroppedTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace,
 		Name:      "alerts_dropped_total",
@@ -157,6 +163,7 @@ func Registry() *prometheus.Registry {
 		ConfigReloadsTotal,
 		ConfigReloadSuccessTimestamp,
 		AlertsDroppedTotal,
+		LabelDropsRefusedTotal,
 		EnrichmentPanicsTotal,
 		CRDRules,
 		CRDRulesRejectedTotal,

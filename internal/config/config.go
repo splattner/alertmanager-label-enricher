@@ -279,8 +279,13 @@ func Load(path string) (*Config, error) {
 func Parse(raw []byte) (*Config, error) {
 	expanded := expandEnv(raw)
 
+	// Strict: an unknown key is an error, not a silent no-op. A typo like
+	// `enrichmnt:` or `retires: 3` would otherwise parse cleanly, leave the
+	// default in place, and give `enricher check` no reason to complain -
+	// a config change that appears to apply and doesn't is a bad failure
+	// mode for the component alert delivery runs through.
 	var cfg Config
-	if err := yaml.Unmarshal(expanded, &cfg); err != nil {
+	if err := yaml.UnmarshalStrict(expanded, &cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 

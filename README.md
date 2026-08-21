@@ -66,7 +66,9 @@ labels earlier rules added. Matchers within one rule are ANDed.
 Adding a new label is always allowed. Overwriting or dropping an existing
 one changes the alert's fingerprint in Alertmanager — which can invalidate
 existing silences — so both require `overwrite: true` (on `set`) or an
-explicit `drop` action.
+explicit `drop` action. A `drop` that would leave an alert with no labels
+at all is skipped: Alertmanager rejects an unlabelled alert and rejects
+the whole batch with it, so the last label is kept to preserve delivery.
 
 `set` and `drop` can target an `annotation` instead of a `label`
 (`set: { annotation: runbook_url, value: ... }`). Annotations carry no

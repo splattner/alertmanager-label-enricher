@@ -347,3 +347,48 @@ func TestValidateAcceptsJqUsingBoundVariables(t *testing.T) {
 		t.Fatalf("Validate rejected jq using $labels/$annotations, which the engine does bind: %v", err)
 	}
 }
+
+// A template that does not parse used to reach production: `enricher check`
+// reported the config valid and the failure surfaced per-alert at runtime,
+// which for a required rule means every batch 503s (ALE-09).
+func TestValidateRejectsUnparseableTemplate(t *testing.T) {
+	for _, tpl := range []string{"{{ .Labels.foo", "{{ nosuchfunc .Labels.a }}", "{{ end }}"} {
+		cfg := validConfig()
+		cfg.Rules[0].Actions[0].Set.From = nil
+		cfg.Rules[0].Actions[0].Set.Template = tpl
+		if err := Validate(cfg); err == nil {
+			t.Errorf("Validate accepted template %q; it would fail per-alert at runtime instead", tpl)
+		}
+	}
+}
+
+func TestValidateAcceptsWellFormedTemplate(t *testing.T) {
+	cfg := validConfig()
+	cfg.Rules[0].Actions[0].Set.From = nil
+	cfg.Rules[0].Actions[0].Set.Template = `{{ lower .Labels.namespace }}-{{ default "none" .Annotations.summary }}`
+	if err := Validate(cfg); err != nil {
+		t.Fatalf("Validate rejected a well-formed template: %v", err)
+	}
+}
+
+// An unknown key silently left the default in place, so a typo'd config
+// change appeared to apply and did not (ALE-10).
+func TestParseRejectsUnknownKeys(t *testing.T) {
+	tests := map[string]string{
+		"typo'd top-level section": "targets:\n  - url: http://am:9093\nenrichmnt:\n  timeout: 99s\nrules:\n  - name: r\n    actions:\n      - set: {label: a, value: b}\n",
+		"typo'd nested key":        "targets:\n  - url: http://am:9093\nforward:\n  retires: 3\nrules:\n  - name: r\n    actions:\n      - set: {label: a, value: b}\n",
+		"typo'd rule field":        "targets:\n  - url: http://am:9093\nrules:\n  - name: r\n    actons:\n      - set: {label: a, value: b}\n",
+	}
+	for name, raw := range tests {
+		if _, err := Parse([]byte(raw)); err == nil {
+			t.Errorf("%s: Parse accepted an unknown key, silently keeping the default", name)
+		}
+	}
+}
+
+func TestParseStillAcceptsAValidConfig(t *testing.T) {
+	raw := "server:\n  listen: \":9099\"\ntargets:\n  - url: http://am:9093\nforward:\n  minSuccess: 1\n  retries: 2\nenrichment:\n  timeout: 3s\nrules:\n  - name: r\n    match:\n      - {label: namespace, op: exists}\n    actions:\n      - set: {label: a, value: b}\n"
+	if _, err := Parse([]byte(raw)); err != nil {
+		t.Fatalf("Parse rejected a valid config under strict decoding: %v", err)
+	}
+}
