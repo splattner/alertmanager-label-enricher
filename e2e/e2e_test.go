@@ -33,7 +33,7 @@ import (
 // runs. .github/workflows/e2e.yml also runs older pinned versions; keep
 // them in sync manually (see the comment on the customManager in
 // renovate.json, which deliberately does not touch the matrix).
-const defaultImage = "quay.io/prometheus/alertmanager:v0.34.0"
+const defaultImage = "quay.io/prometheus/alertmanager:v0.34.1"
 
 type emptyRegistry struct{}
 
